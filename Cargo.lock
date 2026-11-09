@@ -15,6 +15,7 @@ name = "city-ffi"
 version = "0.1.0"
 dependencies = [
  "city-core",
+ "serde",
  "serde_json",
 ]
 

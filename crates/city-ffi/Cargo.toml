@@ -8,4 +8,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 city-core = { path = "../city-core" }
+serde.workspace = true
 serde_json.workspace = true

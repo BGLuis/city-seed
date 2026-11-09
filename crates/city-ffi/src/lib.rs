@@ -2,15 +2,10 @@
 //! engines (Unity via P/Invoke). All strings are NUL-terminated UTF-8 JSON;
 //! strings returned here must be released with `city_string_free`.
 
-use city_core::sim::{Event, Simulation};
-use city_core::{District, DistrictInput, district_hash, generate};
+use city_core::city::{CityEvent, CityInput, CitySession, city_hash, generate_city};
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
-
-pub struct Session {
-    district: District,
-    simulation: Simulation,
-}
+use std::ptr::null_mut;
 
 thread_local! {
     static LAST_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
@@ -26,14 +21,15 @@ fn to_c(text: String) -> *mut c_char {
         .into_raw()
 }
 
-unsafe fn read(text: *const c_char) -> Option<String> {
+unsafe fn parse<T: serde::de::DeserializeOwned>(text: *const c_char) -> Option<T> {
     if text.is_null() {
         fail("null string".into());
         return None;
     }
     // SAFETY: the caller guarantees `text` is a valid NUL-terminated string.
-    match unsafe { CStr::from_ptr(text) }.to_str() {
-        Ok(value) => Some(value.to_owned()),
+    let bytes = unsafe { CStr::from_ptr(text) }.to_bytes();
+    match serde_json::from_slice(bytes) {
+        Ok(value) => Some(value),
         Err(error) => {
             fail(error.to_string());
             None
@@ -41,33 +37,24 @@ unsafe fn read(text: *const c_char) -> Option<String> {
     }
 }
 
+fn json<T: serde::Serialize>(value: &T) -> *mut c_char {
+    to_c(serde_json::to_string(value).expect("model serializes"))
+}
+
 /// Returns a session, or null with `city_last_error` set.
 ///
 /// # Safety
 /// `input` must be a valid NUL-terminated string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn city_generate(input: *const c_char) -> *mut Session {
-    let Some(text) = (unsafe { read(input) }) else {
-        return std::ptr::null_mut();
+pub unsafe extern "C" fn city_generate(input: *const c_char) -> *mut CitySession {
+    let Some(parsed) = (unsafe { parse::<CityInput>(input) }) else {
+        return null_mut();
     };
-    let parsed: DistrictInput = match serde_json::from_str(&text) {
-        Ok(value) => value,
+    match generate_city(&parsed) {
+        Ok(city) => Box::into_raw(Box::new(CitySession::new(city))),
         Err(error) => {
             fail(error.to_string());
-            return std::ptr::null_mut();
-        }
-    };
-    match generate(&parsed) {
-        Ok(district) => {
-            let simulation = Simulation::new(&district);
-            Box::into_raw(Box::new(Session {
-                district,
-                simulation,
-            }))
-        }
-        Err(error) => {
-            fail(error.to_string());
-            std::ptr::null_mut()
+            null_mut()
         }
     }
 }
@@ -75,9 +62,8 @@ pub unsafe extern "C" fn city_generate(input: *const c_char) -> *mut Session {
 /// # Safety
 /// `session` must come from `city_generate` and not have been freed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn city_district_json(session: *const Session) -> *mut c_char {
-    let session = unsafe { &*session };
-    to_c(serde_json::to_string(&session.district).expect("district serializes"))
+pub unsafe extern "C" fn city_json(session: *const CitySession) -> *mut c_char {
+    json(unsafe { &*session }.city())
 }
 
 /// Hash as a hex string: 64-bit integers do not survive JSON in JS or C#.
@@ -85,36 +71,25 @@ pub unsafe extern "C" fn city_district_json(session: *const Session) -> *mut c_c
 /// # Safety
 /// `session` must come from `city_generate` and not have been freed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn city_hash(session: *const Session) -> *mut c_char {
-    let session = unsafe { &*session };
-    to_c(format!("{:016x}", district_hash(&session.district)))
+pub unsafe extern "C" fn city_hash_hex(session: *const CitySession) -> *mut c_char {
+    to_c(format!("{:016x}", city_hash(unsafe { &*session }.city())))
 }
 
-/// Returns a snapshot of the simulation, or null with `city_last_error` set.
+/// Generates the district if needed. Returns null with `city_last_error` set
+/// when the id is unknown.
 ///
 /// # Safety
-/// `session` must come from `city_generate`; `event` must be NUL-terminated.
+/// `session` must come from `city_generate` and not have been freed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn city_apply_event(
-    session: *mut Session,
-    event: *const c_char,
+pub unsafe extern "C" fn city_district_json(
+    session: *mut CitySession,
+    district: usize,
 ) -> *mut c_char {
-    let session = unsafe { &mut *session };
-    let Some(text) = (unsafe { read(event) }) else {
-        return std::ptr::null_mut();
-    };
-    let parsed: Event = match serde_json::from_str(&text) {
-        Ok(value) => value,
+    match unsafe { &mut *session }.detail(district) {
+        Ok(detailed) => json(detailed),
         Err(error) => {
             fail(error.to_string());
-            return std::ptr::null_mut();
-        }
-    };
-    match session.simulation.apply(&session.district, &parsed) {
-        Ok(snapshot) => to_c(serde_json::to_string(&snapshot).expect("snapshot serializes")),
-        Err(error) => {
-            fail(error.to_string());
-            std::ptr::null_mut()
+            null_mut()
         }
     }
 }
@@ -122,11 +97,36 @@ pub unsafe extern "C" fn city_apply_event(
 /// # Safety
 /// `session` must come from `city_generate` and not have been freed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn city_reset(session: *mut Session) -> *mut c_char {
-    let session = unsafe { &mut *session };
-    session.simulation = Simulation::new(&session.district);
-    let snapshot = session.simulation.snapshot(&session.district);
-    to_c(serde_json::to_string(&snapshot).expect("snapshot serializes"))
+pub unsafe extern "C" fn city_snapshot(session: *const CitySession) -> *mut c_char {
+    json(&unsafe { &*session }.snapshot())
+}
+
+/// Returns a snapshot, or null with `city_last_error` set.
+///
+/// # Safety
+/// `session` must come from `city_generate`; `event` must be NUL-terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn city_apply_event(
+    session: *mut CitySession,
+    event: *const c_char,
+) -> *mut c_char {
+    let Some(parsed) = (unsafe { parse::<CityEvent>(event) }) else {
+        return null_mut();
+    };
+    match unsafe { &mut *session }.apply(&parsed) {
+        Ok(snapshot) => json(&snapshot),
+        Err(error) => {
+            fail(error.to_string());
+            null_mut()
+        }
+    }
+}
+
+/// # Safety
+/// `session` must come from `city_generate` and not have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn city_reset(session: *mut CitySession) -> *mut c_char {
+    json(&unsafe { &mut *session }.reset())
 }
 
 #[unsafe(no_mangle)]
@@ -137,7 +137,7 @@ pub extern "C" fn city_last_error() -> *mut c_char {
 /// # Safety
 /// `session` must come from `city_generate` and be freed only once.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn city_free(session: *mut Session) {
+pub unsafe extern "C" fn city_free(session: *mut CitySession) {
     if !session.is_null() {
         drop(unsafe { Box::from_raw(session) });
     }

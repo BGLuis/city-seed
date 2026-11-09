@@ -52,7 +52,8 @@ impl Terrain {
     }
 
     pub fn height(&self, p: Point) -> f64 {
-        40.0 * noise(self.seed, p.x / 900.0, p.y / 900.0)
+        120.0 * noise(self.seed ^ 3, p.x / 30_000.0, p.y / 30_000.0)
+            + 40.0 * noise(self.seed, p.x / 900.0, p.y / 900.0)
             + 14.0 * noise(self.seed ^ 1, p.x / 280.0, p.y / 280.0)
             + 4.0 * noise(self.seed ^ 2, p.x / 90.0, p.y / 90.0)
     }

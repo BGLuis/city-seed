@@ -1,11 +1,14 @@
+pub mod city;
 pub mod geometry;
 pub mod networks;
 pub mod parcels;
 pub mod rng;
 pub mod sim;
+pub mod spatial;
 pub mod streets;
 pub mod terrain;
 
+use city::DensityField;
 use geometry::{Point, is_convex_ccw, point, signed_area};
 use networks::{Network, NetworkSpec, default_specs, validate_specs};
 use parcels::{Building, Lot};
@@ -40,6 +43,16 @@ impl Default for Profile {
 pub struct Port {
     pub network: String,
     pub at: Point,
+    /// Pipe level at the port, for gravity networks joining an existing trunk.
+    #[serde(default)]
+    pub level: Option<f64>,
+}
+
+/// City-wide fields a district must share with its neighbours.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CityContext {
+    pub terrain_seed: u64,
+    pub density: DensityField,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -54,6 +67,8 @@ pub struct DistrictInput {
     pub networks: Option<Vec<NetworkSpec>>,
     #[serde(default)]
     pub extra_networks: Vec<NetworkSpec>,
+    #[serde(default)]
+    pub context: Option<CityContext>,
 }
 
 impl DistrictInput {
@@ -70,6 +85,7 @@ impl DistrictInput {
             profile: Profile::default(),
             networks: None,
             extra_networks: Vec::new(),
+            context: None,
         }
     }
 }
@@ -90,6 +106,8 @@ pub struct District {
 #[derive(Debug, PartialEq)]
 pub enum GenError {
     InvalidBoundary,
+    InvalidPopulation,
+    UnknownDistrict(usize),
     DuplicateNetwork(String),
     UnknownDependency { network: String, requires: String },
     DepthConflict(String, String),
@@ -110,6 +128,10 @@ impl fmt::Display for GenError {
                     "boundary must be a convex CCW polygon of 1 ha to 400 km²"
                 )
             }
+            GenError::InvalidPopulation => {
+                write!(f, "population must be between 1 thousand and 40 million")
+            }
+            GenError::UnknownDistrict(id) => write!(f, "unknown district {id}"),
             GenError::DuplicateNetwork(id) => write!(f, "duplicate network '{id}'"),
             GenError::UnknownDependency { network, requires } => {
                 write!(
@@ -156,7 +178,8 @@ pub fn generate(input: &DistrictInput) -> Result<District, GenError> {
     specs.extend(input.extra_networks.iter().cloned());
     validate_specs(&specs)?;
 
-    let terrain = Terrain::new(input.seed);
+    let context = input.context.as_ref();
+    let terrain = Terrain::new(context.map_or(input.seed, |c| c.terrain_seed));
     let block_area = BASE_BLOCK_AREA * (1.4 - 0.8 * input.profile.density);
     let layout = streets::build(
         &input.boundary,
@@ -168,6 +191,7 @@ pub fn generate(input: &DistrictInput) -> Result<District, GenError> {
         &input.boundary,
         &layout,
         &input.profile,
+        context.map(|c| &c.density),
         &mut Rng::derive(input.seed, "parcels"),
     );
     let networks = networks::build_all(

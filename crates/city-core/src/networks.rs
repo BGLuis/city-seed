@@ -3,6 +3,8 @@ use crate::streets::StreetLayout;
 use crate::terrain::{Terrain, noise};
 use crate::{GenError, Port, Profile};
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -53,7 +55,7 @@ pub struct Segment {
 #[derive(Clone, Debug, Serialize)]
 pub struct Network {
     pub id: String,
-    pub source: usize,
+    pub sources: Vec<usize>,
     pub node_count: usize,
     pub segments: Vec<Segment>,
     pub powered_nodes: Vec<usize>,
@@ -62,6 +64,7 @@ pub struct Network {
 const MIN_DEPTH_CLEARANCE: f64 = 0.2;
 const TRUNK_OUTWARD_DISTANCE: f64 = 40.0;
 const UPHILL_FLOW_PENALTY: f64 = 40.0;
+const MIN_PIPE_RUN: f64 = 1.0;
 
 pub fn default_specs(profile: &Profile) -> Vec<NetworkSpec> {
     let mut specs = vec![
@@ -156,6 +159,35 @@ pub fn port_for(spec: &NetworkSpec, boundary: &[Point], terrain: &Terrain) -> Po
     *vertex + (*vertex - center).normalized() * TRUNK_OUTWARD_DISTANCE
 }
 
+struct Frontier {
+    cost: f64,
+    node: usize,
+}
+
+impl Ord for Frontier {
+    /// Reversed so the max-heap pops the cheapest node, lowest index first.
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .cost
+            .total_cmp(&self.cost)
+            .then(other.node.cmp(&self.node))
+    }
+}
+
+impl PartialOrd for Frontier {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Frontier {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for Frontier {}
+
 struct Graph<'a> {
     layout: &'a StreetLayout,
     adjacency: Vec<Vec<(usize, usize)>>,
@@ -172,44 +204,57 @@ impl<'a> Graph<'a> {
     }
 
     fn nearest_node(&self, p: Point) -> usize {
-        (0..self.layout.nodes.len())
-            .min_by(|a, b| {
-                let da = self.layout.nodes[*a].pos.distance(p);
-                let db = self.layout.nodes[*b].pos.distance(p);
-                da.total_cmp(&db)
-            })
+        self.layout
+            .index
+            .nearest(p)
             .expect("street graph has nodes")
     }
 
-    /// Returns each node's cost to `root` and its next hop towards it.
-    fn shortest_tree(
-        &self,
-        root: usize,
-        cost: impl Fn(usize, usize) -> f64,
-    ) -> (Vec<f64>, Vec<Option<(usize, usize)>>) {
+    /// Grows one shortest-path tree per root; each node joins its cheapest root.
+    fn shortest_forest(&self, roots: &[usize], cost: impl Fn(usize, usize) -> f64) -> Forest {
         let count = self.layout.nodes.len();
         let mut distance = vec![f64::MAX; count];
         let mut next_hop = vec![None; count];
+        let mut owner = vec![0; count];
         let mut settled = vec![false; count];
-        distance[root] = 0.0;
-        for _ in 0..count {
-            let Some(current) = (0..count)
-                .filter(|n| !settled[*n] && distance[*n] < f64::MAX)
-                .min_by(|a, b| distance[*a].total_cmp(&distance[*b]))
-            else {
-                break;
-            };
-            settled[current] = true;
+        let mut frontier = BinaryHeap::new();
+        for (index, root) in roots.iter().enumerate().rev() {
+            distance[*root] = 0.0;
+            owner[*root] = index;
+            frontier.push(Frontier {
+                cost: 0.0,
+                node: *root,
+            });
+        }
+        while let Some(Frontier { node: current, .. }) = frontier.pop() {
+            if std::mem::replace(&mut settled[current], true) {
+                continue;
+            }
             for &(neighbor, edge) in &self.adjacency[current] {
                 let candidate = distance[current] + cost(neighbor, current);
                 if candidate < distance[neighbor] {
                     distance[neighbor] = candidate;
                     next_hop[neighbor] = Some((current, edge));
+                    owner[neighbor] = owner[current];
+                    frontier.push(Frontier {
+                        cost: candidate,
+                        node: neighbor,
+                    });
                 }
             }
         }
-        (distance, next_hop)
+        Forest {
+            distance,
+            next_hop,
+            owner,
+        }
     }
+}
+
+struct Forest {
+    distance: Vec<f64>,
+    next_hop: Vec<Option<(usize, usize)>>,
+    owner: Vec<usize>,
 }
 
 pub fn build_all(
@@ -225,13 +270,22 @@ pub fn build_all(
     specs
         .iter()
         .map(|spec| {
-            let port = ports
+            let mut own_ports: Vec<(Point, Option<f64>)> = ports
                 .iter()
-                .find(|port| port.network == spec.id)
-                .map_or_else(|| port_for(spec, boundary, terrain), |port| port.at);
+                .filter(|port| port.network == spec.id)
+                .map(|port| (port.at, port.level))
+                .collect();
+            if own_ports.is_empty() {
+                own_ports.push((port_for(spec, boundary, terrain), None));
+            }
+            let entries = own_ports
+                .iter()
+                .map(|(at, _)| graph.nearest_node(*at))
+                .collect();
             let builder = Builder {
                 spec,
-                port,
+                ports: own_ports,
+                entries,
                 graph: &graph,
                 terrain,
                 profile,
@@ -244,7 +298,8 @@ pub fn build_all(
 
 struct Builder<'a> {
     spec: &'a NetworkSpec,
-    port: Point,
+    ports: Vec<(Point, Option<f64>)>,
+    entries: Vec<usize>,
     graph: &'a Graph<'a>,
     terrain: &'a Terrain,
     profile: &'a Profile,
@@ -264,12 +319,17 @@ impl Builder<'_> {
         self.graph.layout
     }
 
-    fn source(&self) -> usize {
+    fn street_count(&self) -> usize {
         self.layout().nodes.len()
     }
 
-    fn entry(&self) -> usize {
-        self.graph.nearest_node(self.port)
+    fn source(&self, port: usize) -> usize {
+        self.street_count() + port
+    }
+
+    fn port_of(&self, node: usize) -> Option<&(Point, Option<f64>)> {
+        node.checked_sub(self.street_count())
+            .map(|port| &self.ports[port])
     }
 
     fn is_overhead(&self, a: Point, b: Point) -> bool {
@@ -305,28 +365,37 @@ impl Builder<'_> {
     }
 
     fn endpoint(&self, node: usize) -> (Point, f64) {
-        if node == self.source() {
-            (self.port, self.terrain.height(self.port))
-        } else {
-            let street_node = &self.layout().nodes[node];
-            (street_node.pos, street_node.elevation)
+        match self.port_of(node) {
+            Some((at, _)) => (*at, self.terrain.height(*at)),
+            None => {
+                let street_node = &self.layout().nodes[node];
+                (street_node.pos, street_node.elevation)
+            }
         }
     }
 
     fn finish(&self, segments: Vec<Segment>, powered_nodes: Vec<usize>) -> Network {
         Network {
             id: self.spec.id.clone(),
-            source: self.source(),
-            node_count: self.source() + 1,
+            sources: (0..self.ports.len()).map(|p| self.source(p)).collect(),
+            node_count: self.street_count() + self.ports.len(),
             segments,
             powered_nodes,
         }
     }
 
+    fn port_links(&self) -> Vec<Segment> {
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(port, entry)| self.flat_segment(self.source(port), *entry, None))
+            .collect()
+    }
+
     fn radial(&self) -> Network {
-        let (_, next_hop) = self.tree(|neighbor, current| self.length(neighbor, current));
-        let mut segments = vec![self.flat_segment(self.source(), self.entry(), None)];
-        for (node, hop) in next_hop.iter().enumerate() {
+        let forest = self.forest(|neighbor, current| self.length(neighbor, current));
+        let mut segments = self.port_links();
+        for (node, hop) in forest.next_hop.iter().enumerate() {
             if let Some((parent, edge)) = hop {
                 segments.push(self.flat_segment(*parent, node, Some(*edge)));
             }
@@ -335,31 +404,38 @@ impl Builder<'_> {
     }
 
     fn looped(&self, booster_head: Option<f64>) -> Network {
-        let mut segments = vec![self.flat_segment(self.source(), self.entry(), None)];
+        let mut segments = self.port_links();
         for (index, edge) in self.layout().edges.iter().enumerate() {
             segments.push(self.flat_segment(edge.a, edge.b, Some(index)));
         }
-        let source_ground = self.terrain.height(self.port);
         let powered_nodes = booster_head.map_or_else(Vec::new, |head| {
-            (0..self.layout().nodes.len())
-                .filter(|node| self.layout().nodes[*node].elevation > source_ground - head)
+            let forest = self.forest(|neighbor, current| self.length(neighbor, current));
+            (0..self.street_count())
+                .filter(|node| {
+                    let (_, source_ground) = self.endpoint(self.source(forest.owner[*node]));
+                    self.layout().nodes[*node].elevation > source_ground - head
+                })
                 .collect()
         });
         self.finish(segments, powered_nodes)
     }
 
     fn gravity(&self, slope: f64, max_depth: f64) -> Network {
-        let (distance, next_hop) = self.tree(|neighbor, current| {
+        let forest = self.forest(|neighbor, current| {
             let rise =
                 self.layout().nodes[current].elevation - self.layout().nodes[neighbor].elevation;
             self.length(neighbor, current) + UPHILL_FLOW_PENALTY * rise.max(0.0)
         });
         let cover = self.spec.depth;
-        let mut order: Vec<usize> = (0..self.layout().nodes.len()).collect();
-        order.sort_by(|a, b| distance[*b].total_cmp(&distance[*a]));
+        let mut order: Vec<usize> = (0..self.street_count()).collect();
+        order.sort_by(|a, b| forest.distance[*b].total_cmp(&forest.distance[*a]));
 
-        let mut invert: Vec<f64> = (0..=self.source())
-            .map(|node| self.endpoint(node).1 - cover)
+        let mut invert: Vec<f64> = (0..self.street_count() + self.ports.len())
+            .map(|node| {
+                self.port_of(node)
+                    .and_then(|(_, level)| *level)
+                    .unwrap_or_else(|| self.endpoint(node).1 - cover)
+            })
             .collect();
         let mut segments = Vec::new();
         let mut pumps = Vec::new();
@@ -370,13 +446,19 @@ impl Builder<'_> {
                 invert[node] = ground - cover;
                 pumps.push(node);
             }
-            let (target, edge) = match next_hop[node] {
+            let (target, edge) = match forest.next_hop[node] {
                 Some((parent, edge)) => (parent, Some(edge)),
-                None => (self.source(), None),
+                None => (self.source(forest.owner[node]), None),
             };
             let (target_position, _) = self.endpoint(target);
-            let arrival =
-                (invert[node] - slope * position.distance(target_position)).min(invert[target]);
+            let fall = slope * position.distance(target_position).max(MIN_PIPE_RUN);
+            if let Some((_, Some(level))) = self.port_of(target)
+                && invert[node] - fall < *level
+            {
+                invert[node] = *level + fall;
+                pumps.push(node);
+            }
+            let arrival = (invert[node] - fall).min(invert[target]);
             segments.push(Segment {
                 a: node,
                 b: target,
@@ -391,11 +473,12 @@ impl Builder<'_> {
             invert[target] = arrival;
         }
         pumps.sort_unstable();
+        pumps.dedup();
         self.finish(segments, pumps)
     }
 
-    fn tree(&self, cost: impl Fn(usize, usize) -> f64) -> (Vec<f64>, Vec<Option<(usize, usize)>>) {
-        self.graph.shortest_tree(self.entry(), cost)
+    fn forest(&self, cost: impl Fn(usize, usize) -> f64) -> Forest {
+        self.graph.shortest_forest(&self.entries, cost)
     }
 
     fn length(&self, a: usize, b: usize) -> f64 {

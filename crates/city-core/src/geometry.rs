@@ -7,6 +7,9 @@ pub struct Point {
     pub y: f64,
 }
 
+/// Polygons produced by repeated clipping carry rounding error at collinear vertices.
+const CONVEXITY_TOLERANCE: f64 = 1e-3;
+
 pub fn point(x: f64, y: f64) -> Point {
     Point { x, y }
 }
@@ -77,7 +80,7 @@ pub fn is_convex_ccw(polygon: &[Point]) -> bool {
         let a = polygon[i];
         let b = polygon[(i + 1) % count];
         let c = polygon[(i + 2) % count];
-        (b - a).cross(c - b) >= 0.0
+        (b - a).cross(c - b) >= -CONVEXITY_TOLERANCE
     })
 }
 

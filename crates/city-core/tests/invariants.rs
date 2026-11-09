@@ -21,7 +21,10 @@ fn trunk_index(network: &Network) -> usize {
     network
         .segments
         .iter()
-        .position(|s| s.street_edge.is_none() && (s.a == network.source || s.b == network.source))
+        .position(|s| {
+            s.street_edge.is_none()
+                && (network.sources.contains(&s.a) || network.sources.contains(&s.b))
+        })
         .expect("network has a trunk")
 }
 
@@ -242,6 +245,7 @@ fn a_port_chosen_by_the_macro_level_is_honoured() {
     input.ports.push(Port {
         network: "power".into(),
         at,
+        level: None,
     });
     let district = generate(&input).expect("valid input");
     let power = network(&district, "power");

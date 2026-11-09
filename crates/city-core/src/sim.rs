@@ -1,5 +1,5 @@
 use crate::geometry::{Point, distance_to_segment};
-use crate::networks::RuptureEffect;
+use crate::networks::{Network, NetworkSpec, RuptureEffect};
 use crate::{District, SimError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -45,40 +45,83 @@ pub struct Snapshot {
 
 const FLOOD_CABLE_RADIUS: f64 = 8.0;
 const IGNITION_RADIUS: f64 = 15.0;
-const EXPLOSION_RADIUS: f64 = 25.0;
-const EXPLOSION_MAX_DEPTH: f64 = 3.0;
+pub const EXPLOSION_RADIUS: f64 = 25.0;
+pub const EXPLOSION_MAX_DEPTH: f64 = 3.0;
+
+/// Anything with networks that serve consumers: a district's buildings, or a
+/// city's districts hanging off the trunk lines.
+pub trait Grid {
+    fn network_specs(&self) -> &[NetworkSpec];
+    fn networks(&self) -> &[Network];
+    fn consumer_count(&self) -> usize;
+    fn consumer_node(&self, consumer: usize, network: usize) -> usize;
+    fn consumer_hit(&self, consumer: usize, center: Point, radius: f64) -> bool;
+}
+
+impl Grid for District {
+    fn network_specs(&self) -> &[NetworkSpec] {
+        &self.specs
+    }
+
+    fn networks(&self) -> &[Network] {
+        &self.networks
+    }
+
+    fn consumer_count(&self) -> usize {
+        self.buildings.len()
+    }
+
+    fn consumer_node(&self, consumer: usize, _network: usize) -> usize {
+        self.buildings[consumer].street_node
+    }
+
+    fn consumer_hit(&self, consumer: usize, center: Point, radius: f64) -> bool {
+        self.buildings[consumer]
+            .footprint
+            .iter()
+            .any(|p| p.distance(center) <= radius)
+    }
+}
 
 #[derive(Clone)]
 pub struct Simulation {
     broken: Vec<Vec<bool>>,
+    supply: Vec<bool>,
     destroyed: Vec<bool>,
     hazards: Vec<Hazard>,
     reacted: Vec<bool>,
 }
 
 impl Simulation {
-    pub fn new(district: &District) -> Self {
+    pub fn new(district: &impl Grid) -> Self {
         Self {
             broken: district
-                .networks
+                .networks()
                 .iter()
                 .map(|network| vec![false; network.segments.len()])
                 .collect(),
-            destroyed: vec![false; district.buildings.len()],
+            supply: vec![true; district.networks().len()],
+            destroyed: vec![false; district.consumer_count()],
             hazards: Vec::new(),
             reacted: Vec::new(),
         }
     }
 
-    pub fn apply(&mut self, district: &District, event: &Event) -> Result<Snapshot, SimError> {
+    pub fn apply(&mut self, district: &impl Grid, event: &Event) -> Result<Snapshot, SimError> {
+        self.run(district, event)?;
+        Ok(self.snapshot(district))
+    }
+
+    /// Runs the cascade without the city-wide service pass a snapshot costs.
+    pub fn run(&mut self, district: &impl Grid, event: &Event) -> Result<(), SimError> {
         let mut pending = match event {
             Event::Cut { network, segment } => {
                 let index = district
-                    .networks
+                    .networks()
                     .iter()
                     .position(|n| &n.id == network)
                     .ok_or_else(|| SimError::UnknownNetwork(network.clone()))?;
-                if *segment >= district.networks[index].segments.len() {
+                if *segment >= district.networks()[index].segments.len() {
                     return Err(SimError::UnknownSegment(*segment));
                 }
                 vec![(index, *segment)]
@@ -102,14 +145,31 @@ impl Simulation {
                 break;
             }
         }
-        Ok(self.snapshot(district))
+        Ok(())
     }
 
-    pub fn snapshot(&self, district: &District) -> Snapshot {
+    /// Whether upstream infrastructure still feeds this network's sources.
+    pub fn set_supply(&mut self, network: usize, live: bool) {
+        self.supply[network] = live;
+    }
+
+    pub fn hazard_count(&self) -> usize {
+        self.hazards.len()
+    }
+
+    pub fn explosions_since(&self, start: usize) -> Vec<Point> {
+        self.hazards[start..]
+            .iter()
+            .filter(|hazard| hazard.kind == HazardKind::Explosion)
+            .map(|hazard| hazard.at)
+            .collect()
+    }
+
+    pub fn snapshot(&self, district: &impl Grid) -> Snapshot {
         let served = self.service(district);
         let mut broken = BTreeMap::new();
         let mut outages = BTreeMap::new();
-        for (index, network) in district.networks.iter().enumerate() {
+        for (index, network) in district.networks().iter().enumerate() {
             let segments = self.broken[index]
                 .iter()
                 .enumerate()
@@ -117,12 +177,10 @@ impl Simulation {
                 .map(|(segment, _)| segment)
                 .collect();
             broken.insert(network.id.clone(), segments);
-            let lost = district
-                .buildings
-                .iter()
-                .enumerate()
-                .filter(|(b, building)| !self.destroyed[*b] && !served[index][building.street_node])
-                .map(|(b, _)| b)
+            let lost = (0..district.consumer_count())
+                .filter(|b| {
+                    !self.destroyed[*b] && !served[index][district.consumer_node(*b, index)]
+                })
                 .collect();
             outages.insert(network.id.clone(), lost);
         }
@@ -140,13 +198,13 @@ impl Simulation {
         }
     }
 
-    fn service(&self, district: &District) -> Vec<Vec<bool>> {
-        let mut served: Vec<Vec<bool>> = Vec::with_capacity(district.networks.len());
-        for (index, network) in district.networks.iter().enumerate() {
+    pub fn service(&self, district: &impl Grid) -> Vec<Vec<bool>> {
+        let mut served: Vec<Vec<bool>> = Vec::with_capacity(district.networks().len());
+        for (index, network) in district.networks().iter().enumerate() {
             let mut gated = vec![false; network.node_count];
-            if let Some(required) = &district.specs[index].requires {
+            if let Some(required) = &district.network_specs()[index].requires {
                 let dependency = district
-                    .specs
+                    .network_specs()
                     .iter()
                     .position(|spec| &spec.id == required)
                     .expect("validated at generation");
@@ -162,8 +220,13 @@ impl Simulation {
                 }
             }
             let mut reached = vec![false; network.node_count];
-            reached[network.source] = true;
-            let mut stack = vec![network.source];
+            let mut stack = Vec::new();
+            if self.supply[index] {
+                for source in &network.sources {
+                    reached[*source] = true;
+                    stack.push(*source);
+                }
+            }
             while let Some(node) = stack.pop() {
                 for &next in &adjacency[node] {
                     if !reached[next] && !gated[next] {
@@ -179,22 +242,18 @@ impl Simulation {
 
     fn blast(
         &mut self,
-        district: &District,
+        district: &impl Grid,
         center: Point,
         radius: f64,
         max_depth: f64,
     ) -> Vec<(usize, usize)> {
-        for (index, building) in district.buildings.iter().enumerate() {
-            if building
-                .footprint
-                .iter()
-                .any(|p| p.distance(center) <= radius)
-            {
+        for index in 0..district.consumer_count() {
+            if district.consumer_hit(index, center, radius) {
                 self.destroyed[index] = true;
             }
         }
         let mut hits = Vec::new();
-        for (network_index, network) in district.networks.iter().enumerate() {
+        for (network_index, network) in district.networks().iter().enumerate() {
             for (segment_index, segment) in network.segments.iter().enumerate() {
                 if segment.depth <= max_depth
                     && distance_to_segment(center, segment.pa, segment.pb) <= radius
@@ -206,7 +265,7 @@ impl Simulation {
         hits
     }
 
-    fn rupture(&mut self, district: &District, pending: &[(usize, usize)]) {
+    fn rupture(&mut self, district: &impl Grid, pending: &[(usize, usize)]) {
         if pending.is_empty() {
             return;
         }
@@ -218,12 +277,12 @@ impl Simulation {
                 continue;
             }
             self.broken[network_index][segment_index] = true;
-            let segment = &district.networks[network_index].segments[segment_index];
+            let segment = &district.networks()[network_index].segments[segment_index];
             if !supplied[network_index][segment.a] && !supplied[network_index][segment.b] {
                 continue;
             }
             let at = (segment.pa + segment.pb) * 0.5;
-            for effect in &district.specs[network_index].on_rupture {
+            for effect in &district.network_specs()[network_index].on_rupture {
                 match effect {
                     RuptureEffect::Flood => self.raise(HazardKind::Flood, at),
                     RuptureEffect::GasLeak => self.raise(HazardKind::GasLeak, at),
@@ -261,7 +320,7 @@ impl Simulation {
         changed
     }
 
-    fn ignite(&mut self, district: &District) -> Vec<Vec<(usize, usize)>> {
+    fn ignite(&mut self, district: &impl Grid) -> Vec<Vec<(usize, usize)>> {
         let mut sources = self.of_kind(HazardKind::ElectricRisk);
         sources.extend(self.of_kind(HazardKind::Explosion));
         let mut explosions = Vec::new();

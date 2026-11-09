@@ -10,46 +10,56 @@
   body { margin:0; background:var(--bg); color:var(--text); font:13px/1.45 system-ui,sans-serif; display:grid; grid-template-columns:minmax(0,1fr) 320px; height:100vh; }
   #stage { position:relative; min-width:0; }
   #map { width:100%; height:100%; display:block; cursor:crosshair; }
+  #hint { position:absolute; left:12px; bottom:10px; color:var(--muted); font-size:12px; pointer-events:none; }
   aside { background:var(--panel); border-left:1px solid var(--line); overflow-y:auto; padding:14px; }
   h1 { font-size:15px; margin:0 0 10px; }
   h2 { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:16px 0 6px; }
-  label.row { display:grid; grid-template-columns:1fr 92px; align-items:center; gap:8px; margin:4px 0; }
+  label.row { display:grid; grid-template-columns:1fr 120px; align-items:center; gap:8px; margin:4px 0; }
   label.check { display:flex; align-items:center; gap:7px; margin:3px 0; }
   input[type=number], select { width:100%; background:#10161a; color:var(--text); border:1px solid var(--line); border-radius:4px; padding:3px 5px; }
   input[type=range] { width:100%; }
   button { background:#232d2a; color:var(--text); border:1px solid var(--line); border-radius:4px; padding:5px 10px; cursor:pointer; }
   button:hover { border-color:var(--accent); }
-  .buttons { display:flex; gap:6px; margin-top:8px; }
+  .buttons { display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; }
   .swatch { width:10px; height:10px; border-radius:2px; display:inline-block; }
   .stat { display:flex; justify-content:space-between; margin:2px 0; }
   .stat b { font-weight:600; font-variant-numeric:tabular-nums; }
-  #hash { font-family:ui-monospace,monospace; color:var(--muted); font-size:11px; word-break:break-all; }
+  #hash { font-family:ui-monospace,monospace; color:var(--muted); font-size:11px; word-break:break-all; margin-top:6px; }
   #section { width:100%; height:190px; background:#10161a; border:1px solid var(--line); border-radius:4px; display:block; }
   #error { color:#ff8a70; margin-top:6px; }
   @media (max-width:760px) { body { grid-template-columns:1fr; grid-template-rows:60vh auto; height:auto; } aside { border-left:0; border-top:1px solid var(--line); } }
 </style>
 </head>
 <body>
-<div id="stage"><canvas id="map"></canvas></div>
+<div id="stage"><canvas id="map"></canvas><div id="hint">Roda do mouse: zoom · Arrastar: mover</div></div>
 <aside>
-  <h1>City Seed: distrito</h1>
+  <h1>City Seed</h1>
   <h2>Geração</h2>
   <label class="row">Seed <input id="seed" type="number" value="42" min="0"></label>
-  <label class="row">Tamanho (m) <input id="size" type="number" value="1200" min="200" max="8000" step="100"></label>
+  <label class="row">Porte
+    <select id="preset">
+      <option value="3000">Bairro (3 mil)</option>
+      <option value="400000" selected>Cidade (400 mil)</option>
+      <option value="5000000">Metrópole (5 mi)</option>
+      <option value="21000000">Porte de São Paulo (21 mi)</option>
+      <option value="40000000">Hipermetrópole (40 mi)</option>
+    </select>
+  </label>
+  <label class="row">População <input id="population" type="number" value="400000" min="1000" max="40000000" step="1000"></label>
   <label class="row">Fiação aérea <input id="overhead" type="range" min="0" max="1" step="0.05" value="0.5"></label>
   <label class="row">Parques <input id="parks" type="range" min="0" max="0.4" step="0.02" value="0.08"></label>
-  <label class="row">Densidade <input id="density" type="range" min="0" max="1" step="0.05" value="0.5"></label>
   <label class="check"><input id="gas" type="checkbox" checked> Gás encanado</label>
   <div class="buttons"><button id="generate">Gerar</button><button id="random">Seed aleatória</button></div>
   <div id="error"></div>
 
   <h2>Ferramenta (clique no mapa)</h2>
-  <label class="check"><input type="radio" name="mode" value="destroy" checked> Destruir área</label>
+  <label class="check"><input type="radio" name="mode" value="detail" checked> Detalhar distrito</label>
+  <label class="check"><input type="radio" name="mode" value="destroy"> Destruir área</label>
   <label class="check"><input type="radio" name="mode" value="cut"> Romper trecho de rede</label>
   <label class="check"><input type="radio" name="mode" value="section"> Corte da rua</label>
-  <label class="row">Raio (m) <input id="radius" type="range" min="10" max="300" step="5" value="60"></label>
-  <label class="row">Profundidade (m) <input id="depth" type="range" min="0" max="12" step="0.25" value="1.5"></label>
-  <div class="buttons"><button id="reset">Restaurar cidade</button></div>
+  <label class="row">Raio (m) <input id="radius" type="range" min="10" max="2000" step="10" value="150"></label>
+  <label class="row">Profundidade (m) <input id="depth" type="range" min="0" max="20" step="0.25" value="1.5"></label>
+  <div class="buttons"><button id="reset">Restaurar cidade</button><button id="fit">Ver cidade inteira</button></div>
 
   <h2>Camadas</h2>
   <div id="layers"></div>

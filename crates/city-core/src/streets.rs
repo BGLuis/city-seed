@@ -1,9 +1,9 @@
-use crate::geometry::{
-    Point, clip_half_plane, distance_to_segment, edges, extent, longest_edge_direction, signed_area,
-};
+use crate::geometry::{Point, clip_half_plane, edges, extent, longest_edge_direction, signed_area};
 use crate::rng::Rng;
+use crate::spatial::SpatialIndex;
 use crate::terrain::Terrain;
 use serde::Serialize;
+use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -40,6 +40,7 @@ pub struct StreetLayout {
     pub edges: Vec<StreetEdge>,
     pub blocks: Vec<Vec<Point>>,
     pub arterials: Vec<(Point, Point)>,
+    pub index: SpatialIndex,
 }
 
 struct RawStreet {
@@ -48,12 +49,34 @@ struct RawStreet {
     class: StreetClass,
 }
 
-const ON_LINE_TOLERANCE: f64 = 0.01;
+pub const ON_LINE_TOLERANCE: f64 = 0.01;
 const ARTERIAL_SPLIT_DEPTH: u32 = 2;
 
 pub fn build(
     boundary: &[Point],
     block_area: f64,
+    terrain: &Terrain,
+    rng: &mut Rng,
+) -> StreetLayout {
+    let is_block =
+        |polygon: &[Point], rng: &mut Rng| signed_area(polygon) <= block_area * rng.range(0.8, 1.3);
+    build_with(
+        boundary,
+        is_block,
+        ARTERIAL_SPLIT_DEPTH,
+        block_area.sqrt(),
+        terrain,
+        rng,
+    )
+}
+
+/// Splits `boundary` until `is_leaf` accepts each piece, then nodes the cut
+/// lines into a planar graph whose T-junctions are shared by every street.
+pub fn build_with(
+    boundary: &[Point],
+    mut is_leaf: impl FnMut(&[Point], &mut Rng) -> bool,
+    arterial_depth: u32,
+    index_cell: f64,
     terrain: &Terrain,
     rng: &mut Rng,
 ) -> StreetLayout {
@@ -65,27 +88,35 @@ pub fn build(
         })
         .collect();
     let mut blocks = Vec::new();
-    split(boundary, 0, block_area, rng, &mut raw, &mut blocks);
+    split(
+        boundary,
+        0,
+        arterial_depth,
+        &mut is_leaf,
+        rng,
+        &mut raw,
+        &mut blocks,
+    );
 
-    let mut nodes: Vec<Point> = Vec::new();
+    let mut index = SpatialIndex::new(index_cell);
     for street in &raw {
-        intern(&mut nodes, street.a);
-        intern(&mut nodes, street.b);
+        intern(&mut index, street.a);
+        intern(&mut index, street.b);
     }
 
     let mut street_edges: Vec<StreetEdge> = Vec::new();
+    let mut known_edges = BTreeSet::new();
     for street in &raw {
         let axis = street.b - street.a;
-        let mut along: Vec<(f64, usize)> = nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| distance_to_segment(**p, street.a, street.b) < ON_LINE_TOLERANCE)
-            .map(|(i, p)| ((*p - street.a).dot(axis), i))
+        let mut along: Vec<(f64, usize)> = index
+            .on_segment(street.a, street.b, ON_LINE_TOLERANCE)
+            .into_iter()
+            .map(|i| ((index.points()[i] - street.a).dot(axis), i))
             .collect();
         along.sort_by(|l, r| l.0.total_cmp(&r.0));
         for pair in along.windows(2) {
             let (a, b) = (pair[0].1.min(pair[1].1), pair[0].1.max(pair[1].1));
-            if !street_edges.iter().any(|e| e.a == a && e.b == b) {
+            if known_edges.insert((a, b)) {
                 street_edges.push(StreetEdge {
                     a,
                     b,
@@ -97,11 +128,12 @@ pub fn build(
     }
 
     StreetLayout {
-        nodes: nodes
-            .into_iter()
+        nodes: index
+            .points()
+            .iter()
             .map(|pos| StreetNode {
-                pos,
-                elevation: terrain.height(pos),
+                pos: *pos,
+                elevation: terrain.height(*pos),
             })
             .collect(),
         edges: street_edges,
@@ -111,24 +143,26 @@ pub fn build(
             .filter(|s| s.class == StreetClass::Arterial)
             .map(|s| (s.a, s.b))
             .collect(),
+        index,
     }
 }
 
-fn intern(nodes: &mut Vec<Point>, p: Point) {
-    if !nodes.iter().any(|n| n.distance(p) < ON_LINE_TOLERANCE) {
-        nodes.push(p);
+fn intern(index: &mut SpatialIndex, p: Point) {
+    if !index.any_within(p, ON_LINE_TOLERANCE) {
+        index.insert(p);
     }
 }
 
 fn split(
     polygon: &[Point],
     depth: u32,
-    block_area: f64,
+    arterial_depth: u32,
+    is_leaf: &mut impl FnMut(&[Point], &mut Rng) -> bool,
     rng: &mut Rng,
     raw: &mut Vec<RawStreet>,
     blocks: &mut Vec<Vec<Point>>,
 ) {
-    if signed_area(polygon) <= block_area * rng.range(0.8, 1.3) {
+    if is_leaf(polygon, rng) {
         blocks.push(polygon.to_vec());
         return;
     }
@@ -148,7 +182,7 @@ fn split(
             .collect::<Vec<_>>(),
         tangent,
     );
-    let class = if depth < ARTERIAL_SPLIT_DEPTH {
+    let class = if depth < arterial_depth {
         StreetClass::Arterial
     } else {
         StreetClass::Local
@@ -158,6 +192,7 @@ fn split(
         b: origin + tangent * end,
         class,
     });
-    split(&near_side, depth + 1, block_area, rng, raw, blocks);
-    split(&far_side, depth + 1, block_area, rng, raw, blocks);
+    for side in [&near_side, &far_side] {
+        split(side, depth + 1, arterial_depth, is_leaf, rng, raw, blocks);
+    }
 }

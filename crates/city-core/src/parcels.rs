@@ -1,4 +1,5 @@
 use crate::Profile;
+use crate::city::DensityField;
 use crate::geometry::{
     Point, centroid, clip_band, distance_to_segment, edges, extent, inset_edges,
     longest_edge_direction, signed_area,
@@ -42,6 +43,7 @@ pub fn subdivide(
     boundary: &[Point],
     layout: &StreetLayout,
     profile: &Profile,
+    city_density: Option<&DensityField>,
     rng: &mut Rng,
 ) -> (Vec<Lot>, Vec<Building>) {
     let center = centroid(boundary);
@@ -62,7 +64,10 @@ pub fn subdivide(
             continue;
         }
         let middle = centroid(&buildable);
-        let value = land_value(middle, center, radius, value_seed);
+        let value = city_density.map_or_else(
+            || land_value(middle, center, radius, value_seed),
+            |field| field.at(middle),
+        );
         let land_use = choose_land_use(value, profile, rng);
         if land_use == LandUse::Park {
             lots.push(Lot {
@@ -175,11 +180,5 @@ fn floors(land_use: LandUse, value: f64, profile: &Profile, rng: &mut Rng) -> u3
 }
 
 fn nearest_node(p: Point, layout: &StreetLayout) -> usize {
-    layout
-        .nodes
-        .iter()
-        .enumerate()
-        .min_by(|(_, a), (_, b)| a.pos.distance(p).total_cmp(&b.pos.distance(p)))
-        .map(|(i, _)| i)
-        .expect("street graph has nodes")
+    layout.index.nearest(p).expect("street graph has nodes")
 }
