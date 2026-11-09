@@ -1,0 +1,199 @@
+pub mod geometry;
+pub mod networks;
+pub mod parcels;
+pub mod rng;
+pub mod sim;
+pub mod streets;
+pub mod terrain;
+
+use geometry::{Point, is_convex_ccw, point, signed_area};
+use networks::{Network, NetworkSpec, default_specs, validate_specs};
+use parcels::{Building, Lot};
+use rng::{Rng, fnv1a};
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use streets::{StreetEdge, StreetNode};
+use terrain::{Terrain, TerrainGrid};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Profile {
+    pub overhead_share: f64,
+    pub piped_gas: bool,
+    pub park_share: f64,
+    pub density: f64,
+}
+
+impl Default for Profile {
+    fn default() -> Self {
+        Self {
+            overhead_share: 0.5,
+            piped_gas: true,
+            park_share: 0.08,
+            density: 0.5,
+        }
+    }
+}
+
+/// Where a network enters the district. The macro level will set these so
+/// neighbouring districts meet the same trunk lines.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Port {
+    pub network: String,
+    pub at: Point,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DistrictInput {
+    pub seed: u64,
+    pub boundary: Vec<Point>,
+    #[serde(default)]
+    pub ports: Vec<Port>,
+    #[serde(default)]
+    pub profile: Profile,
+    #[serde(default)]
+    pub networks: Option<Vec<NetworkSpec>>,
+    #[serde(default)]
+    pub extra_networks: Vec<NetworkSpec>,
+}
+
+impl DistrictInput {
+    pub fn square(seed: u64, size: f64) -> Self {
+        Self {
+            seed,
+            boundary: vec![
+                point(0.0, 0.0),
+                point(size, 0.0),
+                point(size, size),
+                point(0.0, size),
+            ],
+            ports: Vec::new(),
+            profile: Profile::default(),
+            networks: None,
+            extra_networks: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct District {
+    pub seed: u64,
+    pub boundary: Vec<Point>,
+    pub terrain: TerrainGrid,
+    pub street_nodes: Vec<StreetNode>,
+    pub street_edges: Vec<StreetEdge>,
+    pub lots: Vec<Lot>,
+    pub buildings: Vec<Building>,
+    pub specs: Vec<NetworkSpec>,
+    pub networks: Vec<Network>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum GenError {
+    InvalidBoundary,
+    DuplicateNetwork(String),
+    UnknownDependency { network: String, requires: String },
+    DepthConflict(String, String),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum SimError {
+    UnknownNetwork(String),
+    UnknownSegment(usize),
+}
+
+impl fmt::Display for GenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GenError::InvalidBoundary => {
+                write!(
+                    f,
+                    "boundary must be a convex CCW polygon of 1 ha to 400 km²"
+                )
+            }
+            GenError::DuplicateNetwork(id) => write!(f, "duplicate network '{id}'"),
+            GenError::UnknownDependency { network, requires } => {
+                write!(
+                    f,
+                    "network '{network}' requires '{requires}', which must be declared before it"
+                )
+            }
+            GenError::DepthConflict(a, b) => {
+                write!(
+                    f,
+                    "networks '{a}' and '{b}' are too close in depth to cross"
+                )
+            }
+        }
+    }
+}
+
+impl fmt::Display for SimError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SimError::UnknownNetwork(id) => write!(f, "unknown network '{id}'"),
+            SimError::UnknownSegment(index) => write!(f, "unknown segment {index}"),
+        }
+    }
+}
+
+const MIN_DISTRICT_AREA: f64 = 1.0e4;
+const MAX_DISTRICT_AREA: f64 = 4.0e8;
+const BASE_BLOCK_AREA: f64 = 16_000.0;
+
+pub fn generate(input: &DistrictInput) -> Result<District, GenError> {
+    let area = signed_area(&input.boundary);
+    if input.boundary.len() < 3
+        || !is_convex_ccw(&input.boundary)
+        || !(MIN_DISTRICT_AREA..=MAX_DISTRICT_AREA).contains(&area)
+    {
+        return Err(GenError::InvalidBoundary);
+    }
+
+    let mut specs = input
+        .networks
+        .clone()
+        .unwrap_or_else(|| default_specs(&input.profile));
+    specs.extend(input.extra_networks.iter().cloned());
+    validate_specs(&specs)?;
+
+    let terrain = Terrain::new(input.seed);
+    let block_area = BASE_BLOCK_AREA * (1.4 - 0.8 * input.profile.density);
+    let layout = streets::build(
+        &input.boundary,
+        block_area,
+        &terrain,
+        &mut Rng::derive(input.seed, "streets"),
+    );
+    let (lots, buildings) = parcels::subdivide(
+        &input.boundary,
+        &layout,
+        &input.profile,
+        &mut Rng::derive(input.seed, "parcels"),
+    );
+    let networks = networks::build_all(
+        &specs,
+        &input.ports,
+        &input.boundary,
+        &layout,
+        &terrain,
+        &input.profile,
+        Rng::derive(input.seed, "overhead").next_u64(),
+    );
+
+    Ok(District {
+        seed: input.seed,
+        boundary: input.boundary.clone(),
+        terrain: terrain.grid(&input.boundary),
+        street_nodes: layout.nodes,
+        street_edges: layout.edges,
+        lots,
+        buildings,
+        specs,
+        networks,
+    })
+}
+
+pub fn district_hash(district: &District) -> u64 {
+    let serialized = serde_json::to_string(district).expect("district serializes");
+    fnv1a(serialized.as_bytes())
+}

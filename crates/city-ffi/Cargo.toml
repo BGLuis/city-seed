@@ -1,0 +1,11 @@
+[package]
+name = "city-ffi"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+city-core = { path = "../city-core" }
+serde_json.workspace = true
