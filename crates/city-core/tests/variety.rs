@@ -29,7 +29,7 @@ fn blocks(shape: f64, irregularity: f64, seed: u64) -> (Vec<Vec<Point>>, f64) {
             bridge_every: 5,
             rivers: &[],
         },
-        &Terrain::new(seed),
+        &Terrain::new(seed, 1.0),
         &mut Rng::derive(seed, "test"),
     );
     (layout.blocks, size)

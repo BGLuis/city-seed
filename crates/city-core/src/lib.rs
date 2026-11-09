@@ -1,4 +1,5 @@
 pub mod city;
+pub mod environment;
 pub mod geometry;
 pub mod networks;
 pub mod parcels;
@@ -12,6 +13,7 @@ pub mod terrain;
 pub mod transit;
 
 use city::DensityField;
+use environment::Environment;
 use geometry::{Point, is_convex_ccw, point, signed_area};
 use networks::{Network, NetworkSpec, default_specs, reject_transit, validate_specs};
 use parcels::{Building, Corridors, Lot};
@@ -34,6 +36,11 @@ pub struct Profile {
     pub rivers: u32,
     pub metro_density: f64,
     pub rail_density: f64,
+    pub mean_temperature: f64,
+    pub annual_rainfall: f64,
+    pub bedrock_depth: f64,
+    pub seismic_risk: f64,
+    pub relief: f64,
 }
 
 impl Default for Profile {
@@ -48,6 +55,11 @@ impl Default for Profile {
             rivers: 0,
             metro_density: 0.0,
             rail_density: 0.0,
+            mean_temperature: 20.0,
+            annual_rainfall: 1200.0,
+            bedrock_depth: 15.0,
+            seismic_risk: 0.1,
+            relief: 1.0,
         }
     }
 }
@@ -154,7 +166,7 @@ impl fmt::Display for GenError {
             GenError::InvalidProfile => {
                 write!(
                     f,
-                    "block_shape and street_irregularity must be between 0 and 1"
+                    "profile has an out-of-range block, climate or geology value"
                 )
             }
             GenError::UnknownRegion(id) => write!(f, "unknown region '{id}'"),
@@ -198,7 +210,13 @@ const LOCAL_BRIDGE_SPACING: usize = 5;
 
 pub fn validate_profile(profile: &Profile) -> Result<(), GenError> {
     let unit = 0.0..=1.0;
-    if unit.contains(&profile.block_shape) && unit.contains(&profile.street_irregularity) {
+    if unit.contains(&profile.block_shape)
+        && unit.contains(&profile.street_irregularity)
+        && unit.contains(&profile.seismic_risk)
+        && profile.annual_rainfall >= 0.0
+        && profile.bedrock_depth > 0.0
+        && profile.relief >= 0.0
+    {
         Ok(())
     } else {
         Err(GenError::InvalidProfile)
@@ -224,12 +242,20 @@ pub fn generate(input: &DistrictInput) -> Result<District, GenError> {
     validate_profile(&input.profile)?;
 
     let context = input.context.as_ref();
-    let terrain = Terrain::new(context.map_or(input.seed, |c| c.terrain_seed));
+    let city_seed = context.map_or(input.seed, |c| c.terrain_seed);
+    let terrain = Terrain::new(city_seed, input.profile.relief);
     let block_area = BASE_BLOCK_AREA * (1.4 - 0.8 * input.profile.density);
     let corridors = Corridors {
         rivers: context.map_or(&[], |c| &c.rivers),
         rails: context.map_or(&[], |c| &c.rails),
     };
+    let environment = Environment::new(
+        city_seed,
+        &input.profile,
+        &terrain,
+        corridors.rivers,
+        context.map(|c| &c.density),
+    );
     let layout = streets::build(
         &input.boundary,
         &StreetOptions {
@@ -251,6 +277,7 @@ pub fn generate(input: &DistrictInput) -> Result<District, GenError> {
         &input.profile,
         context.map(|c| &c.density),
         &corridors,
+        &environment,
         &mut Rng::derive(input.seed, "parcels"),
     );
     let networks = networks::build_all(
@@ -258,8 +285,7 @@ pub fn generate(input: &DistrictInput) -> Result<District, GenError> {
         &input.ports,
         &input.boundary,
         &layout,
-        &terrain,
-        &input.profile,
+        &environment,
         Rng::derive(input.seed, "overhead").next_u64(),
     );
 

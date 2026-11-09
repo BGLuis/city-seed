@@ -1,3 +1,4 @@
+use crate::environment::Environment;
 use crate::geometry::{Point, centroid, distance_to_segment, edges, point};
 use crate::networks::{
     Network, NetworkSpec, Topology, build_all, default_specs, reject_transit, validate_specs,
@@ -163,9 +164,10 @@ pub fn generate_city(input: &CityInput) -> Result<City, GenError> {
         point(side, side),
         point(0.0, side),
     ];
-    let terrain = Terrain::new(seed);
+    let terrain = Terrain::new(seed, input.profile.relief);
     let density = DensityField::new(seed, side);
     let rivers = rivers::generate(seed, input.profile.rivers, side, &terrain);
+    let environment = Environment::new(seed, &input.profile, &terrain, &rivers, Some(&density));
     let layout = streets::build(
         &boundary,
         &StreetOptions {
@@ -189,13 +191,13 @@ pub fn generate_city(input: &CityInput) -> Result<City, GenError> {
         &ports,
         &boundary,
         &layout,
-        &terrain,
-        &input.profile,
+        &environment,
         Rng::derive(seed, "trunk-overhead").next_u64(),
     );
     let lines = transit::build(
         &layout,
         &density,
+        &environment,
         &input.profile,
         input.population,
         side,

@@ -1,0 +1,10 @@
+[package]
+name = "city-tools"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+city-core = { path = "../city-core" }
+serde.workspace = true
+serde_json.workspace = true
+tiny-skia = "0.11"

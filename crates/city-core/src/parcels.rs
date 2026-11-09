@@ -1,5 +1,6 @@
 use crate::Profile;
 use crate::city::DensityField;
+use crate::environment::{Environment, Soil};
 use crate::geometry::{
     Point, centroid, clip_band, distance_to_segment, edges, extent, inset_edges,
     longest_edge_direction, polyline_touches_polygon, signed_area,
@@ -18,6 +19,8 @@ pub enum LandUse {
     Park,
     Water,
     Rail,
+    Forest,
+    Wetland,
 }
 
 /// Linear features that claim whole blocks from development.
@@ -30,6 +33,7 @@ pub struct Corridors<'a> {
 pub struct Lot {
     pub polygon: Vec<Point>,
     pub land_use: LandUse,
+    pub soil: Soil,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -46,6 +50,11 @@ const MIN_FOOTPRINT_AREA: f64 = 30.0;
 const TWO_ROW_DEPTH: f64 = 70.0;
 const ARTERIAL_SETBACK: f64 = 14.0;
 const LOCAL_SETBACK: f64 = 8.0;
+const FLOOD_LIMIT: f64 = 0.6;
+const STEEP_SLOPE: f64 = 0.2;
+const WILD_LAND_VALUE: f64 = 0.07;
+const LUSH_VEGETATION: f64 = 0.55;
+const SEISMIC_HEIGHT_PENALTY: f64 = 0.6;
 
 pub fn subdivide(
     boundary: &[Point],
@@ -53,6 +62,7 @@ pub fn subdivide(
     profile: &Profile,
     city_density: Option<&DensityField>,
     corridors: &Corridors,
+    environment: &Environment,
     rng: &mut Rng,
 ) -> (Vec<Lot>, Vec<Building>) {
     let center = centroid(boundary);
@@ -70,10 +80,15 @@ pub fn subdivide(
                 .iter()
                 .any(|line| polyline_touches_polygon(line, block))
         };
+        let ground = environment.sample(centroid(block));
         let claimed = if touches(corridors.rivers) {
             Some(LandUse::Water)
         } else if touches(corridors.rails) {
             Some(LandUse::Rail)
+        } else if ground.flood_risk > FLOOD_LIMIT {
+            Some(LandUse::Wetland)
+        } else if ground.slope > STEEP_SLOPE {
+            Some(LandUse::Forest)
         } else {
             None
         };
@@ -81,6 +96,7 @@ pub fn subdivide(
             lots.push(Lot {
                 polygon: block.clone(),
                 land_use,
+                soil: ground.soil,
             });
             continue;
         }
@@ -96,26 +112,37 @@ pub fn subdivide(
             || land_value(middle, center, radius, value_seed),
             |field| field.at(middle),
         );
-        let land_use = choose_land_use(value, profile, rng);
-        if land_use == LandUse::Park {
+        let land_use = if value < WILD_LAND_VALUE && ground.vegetation > LUSH_VEGETATION {
+            LandUse::Forest
+        } else {
+            choose_land_use(value, ground.vegetation, profile, rng)
+        };
+        if matches!(land_use, LandUse::Park | LandUse::Forest) {
             lots.push(Lot {
                 polygon: buildable,
                 land_use,
+                soil: ground.soil,
             });
             continue;
         }
         for polygon in split_lots(&buildable, land_use, rng) {
             let lot = lots.len();
+            let soil = environment.soil(centroid(&polygon));
             if let Some(footprint) = footprint_of(&polygon, rng) {
                 buildings.push(Building {
                     lot,
                     street_node: nearest_node(centroid(&footprint), layout),
-                    floors: floors(land_use, value, profile, rng),
+                    floors: floors(land_use, value, profile, rng)
+                        .min(height_limit(soil, profile.seismic_risk)),
                     land_use,
                     footprint,
                 });
             }
-            lots.push(Lot { polygon, land_use });
+            lots.push(Lot {
+                polygon,
+                land_use,
+                soil,
+            });
         }
     }
     (lots, buildings)
@@ -139,8 +166,19 @@ fn land_value(p: Point, center: Point, radius: f64, seed: u64) -> f64 {
     (0.65 * centrality + 0.5 * noise(seed, p.x / 500.0, p.y / 500.0) - 0.05).clamp(0.0, 1.0)
 }
 
-fn choose_land_use(value: f64, profile: &Profile, rng: &mut Rng) -> LandUse {
-    if rng.chance(profile.park_share) {
+/// Taller towers need firmer ground, and earthquakes lower every limit.
+fn height_limit(soil: Soil, seismic_risk: f64) -> u32 {
+    let bearing = match soil {
+        Soil::Rocky => 120.0,
+        Soil::Clay => 40.0,
+        Soil::Sand => 25.0,
+        Soil::Alluvial => 12.0,
+    };
+    ((bearing * (1.0 - SEISMIC_HEIGHT_PENALTY * seismic_risk)) as u32).max(1)
+}
+
+fn choose_land_use(value: f64, vegetation: f64, profile: &Profile, rng: &mut Rng) -> LandUse {
+    if rng.chance(profile.park_share * (0.5 + vegetation)) {
         LandUse::Park
     } else if value > 0.62 {
         LandUse::Commercial
@@ -164,7 +202,7 @@ fn split_lots(buildable: &[Point], land_use: LandUse, rng: &mut Rng) -> Vec<Vec<
     let target = match land_use {
         LandUse::Commercial => 28.0,
         LandUse::Industrial => 50.0,
-        LandUse::Residential | LandUse::Park | LandUse::Water | LandUse::Rail => 16.0,
+        _ => 16.0,
     };
 
     let mut result = Vec::new();
@@ -202,7 +240,7 @@ fn floors(land_use: LandUse, value: f64, profile: &Profile, rng: &mut Rng) -> u3
         LandUse::Commercial => rng.range(5.0, 40.0) * value * value * scale,
         LandUse::Residential => rng.range(2.0, 12.0) * value * scale,
         LandUse::Industrial => rng.range(1.0, 3.0),
-        LandUse::Park | LandUse::Water | LandUse::Rail => 0.0,
+        _ => 0.0,
     };
     (height as u32).max(1)
 }

@@ -1,5 +1,6 @@
 use crate::Profile;
 use crate::city::DensityField;
+use crate::environment::{Environment, Soil};
 use crate::geometry::{Point, point};
 use crate::networks::{Graph, Network, NetworkSpec, Segment, Topology};
 use crate::rng::Rng;
@@ -13,6 +14,15 @@ const RAIL_LINE_SPACING: f64 = 15_000.0;
 const METRO_REACH: f64 = 25_000.0;
 const STATION_SPACING: f64 = 4_000.0;
 const MIN_TUNNEL_COVER: f64 = 5.0;
+
+#[derive(Clone, Copy)]
+struct Site<'a> {
+    layout: &'a StreetLayout,
+    graph: &'a Graph<'a>,
+    density: &'a DensityField,
+    environment: &'a Environment<'a>,
+    side: f64,
+}
 
 pub struct TransitLines {
     pub networks: Vec<(NetworkSpec, Network)>,
@@ -50,26 +60,34 @@ fn rail_spec() -> NetworkSpec {
 pub fn build(
     layout: &StreetLayout,
     density: &DensityField,
+    environment: &Environment,
     profile: &Profile,
     population: u64,
     side: f64,
     rng: &mut Rng,
 ) -> TransitLines {
     let graph = Graph::new(layout);
+    let site = Site {
+        layout,
+        graph: &graph,
+        density,
+        environment,
+        side,
+    };
     let mut networks = Vec::new();
     let mut rails = Vec::new();
 
     let metro_lines = line_count(profile.metro_density, side, METRO_LINE_SPACING);
     if population >= METRO_MIN_POPULATION && metro_lines > 0 {
         let spec = metro_spec();
-        let network = metro(&spec, metro_lines, layout, &graph, density, side, rng);
+        let network = metro(&spec, metro_lines, &site, rng);
         networks.push((spec, network));
     }
 
     let rail_lines = line_count(profile.rail_density, side, RAIL_LINE_SPACING);
     if population >= RAIL_MIN_POPULATION && rail_lines > 0 {
         let spec = rail_spec();
-        let (network, lines) = rail(&spec, rail_lines, layout, &graph, density, side, rng);
+        let (network, lines) = rail(&spec, rail_lines, &site, rng);
         networks.push((spec, network));
         rails = lines;
     }
@@ -120,15 +138,14 @@ fn track_level(node: usize, layout: &StreetLayout, spec: &NetworkSpec) -> f64 {
     total / (neighbours.len() + 1) as f64 - spec.depth
 }
 
-fn metro(
-    spec: &NetworkSpec,
-    lines: u32,
-    layout: &StreetLayout,
-    graph: &Graph,
-    density: &DensityField,
-    side: f64,
-    rng: &mut Rng,
-) -> Network {
+fn metro(spec: &NetworkSpec, lines: u32, site: &Site, rng: &mut Rng) -> Network {
+    let Site {
+        layout,
+        graph,
+        density,
+        environment,
+        side,
+    } = *site;
     let mut built = BTreeSet::new();
     let mut termini = BTreeSet::new();
     let mut stations = BTreeSet::new();
@@ -152,7 +169,15 @@ fn metro(
         for (next, edge) in hops {
             stations.insert(next);
             if built.insert(edge) {
-                segments.push(metro_segment(current, next, edge, layout, spec, height));
+                segments.push(metro_segment(
+                    current,
+                    next,
+                    edge,
+                    layout,
+                    spec,
+                    environment,
+                    height,
+                ));
             }
             current = next;
         }
@@ -166,12 +191,14 @@ fn metro_segment(
     edge: usize,
     layout: &StreetLayout,
     spec: &NetworkSpec,
+    environment: &Environment,
     height: f64,
 ) -> Segment {
     let (ground_a, ground_b) = (layout.nodes[a].elevation, layout.nodes[b].elevation);
     let (level_a, level_b) = (track_level(a, layout, spec), track_level(b, layout, spec));
     let cover = ((ground_a - level_a) + (ground_b - level_b)) / 2.0;
-    let elevated = cover < MIN_TUNNEL_COVER;
+    let waterlogged = |node: usize| environment.soil(layout.nodes[node].pos) == Soil::Alluvial;
+    let elevated = cover < MIN_TUNNEL_COVER || (waterlogged(a) && waterlogged(b));
     Segment {
         a,
         b,
@@ -185,15 +212,14 @@ fn metro_segment(
     }
 }
 
-fn rail(
-    spec: &NetworkSpec,
-    lines: u32,
-    layout: &StreetLayout,
-    graph: &Graph,
-    density: &DensityField,
-    side: f64,
-    rng: &mut Rng,
-) -> (Network, Vec<Vec<Point>>) {
+fn rail(spec: &NetworkSpec, lines: u32, site: &Site, rng: &mut Rng) -> (Network, Vec<Vec<Point>>) {
+    let Site {
+        layout,
+        graph,
+        density,
+        side,
+        ..
+    } = *site;
     let hub_position = density.centers[0].at;
     let hub = graph.nearest_node(hub_position);
     let mut termini = BTreeSet::from([hub]);

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/city-core", "crates/city-ffi"]
+members = ["crates/city-core", "crates/city-ffi", "crates/city-tools"]
 
 [workspace.package]
 version = "0.1.0"

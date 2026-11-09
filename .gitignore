@@ -1,3 +1,4 @@
 /target/
+/maps/
 /viewer/city.wasm
 /.playwright-mcp/

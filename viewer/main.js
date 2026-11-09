@@ -79,6 +79,11 @@ function generate() {
       piped_gas: $("gas").checked,
       park_share: Number($("parks").value),
       density: 0.5,
+      mean_temperature: Number($("temperature").value),
+      annual_rainfall: Number($("rainfall").value),
+      bedrock_depth: Number($("bedrock").value),
+      seismic_risk: Number($("seismic").value),
+      relief: Number($("relief").value),
       block_shape: Number($("shape").value),
       street_irregularity: Number($("irregularity").value),
       rivers: Number($("rivers").value),
@@ -248,8 +253,9 @@ function buildLocalPaths(entry, id) {
   const parks = new Path2D();
   const water = new Path2D();
   const railBeds = new Path2D();
+  const wetland = new Path2D();
   for (const lot of district.lots) {
-    const target = { park: parks, water, rail: railBeds }[lot.land_use];
+    const target = { park: parks, forest: parks, water, wetland, rail: railBeds }[lot.land_use];
     if (target) polygonPath(target, lot.polygon);
   }
   const streets = { arterial: new Path2D(), local: new Path2D(), bridge: new Path2D() };
@@ -260,7 +266,7 @@ function buildLocalPaths(entry, id) {
     target.moveTo(a.x, a.y);
     target.lineTo(b.x, b.y);
   }
-  entry.paths = { buildings, lostPath, destroyedPath, parks, water, railBeds, streets, networks: networkPaths(district.networks, district.specs, state.broken, district.street_nodes) };
+  entry.paths = { buildings, lostPath, destroyedPath, parks, water, wetland, railBeds, streets, networks: networkPaths(district.networks, district.specs, state.broken, district.street_nodes) };
 }
 
 function refreshState() {
@@ -360,6 +366,8 @@ function drawLocal(entry) {
   }
   ctx.fillStyle = "#4a4640";
   ctx.fill(paths.railBeds);
+  ctx.fillStyle = "#3f6b63";
+  ctx.fill(paths.wetland);
   if (visible.streets) {
     ctx.lineCap = "round";
     ctx.strokeStyle = "#39433f";
@@ -682,6 +690,11 @@ function applyRegion() {
   $("overhead").value = profile.overhead_share;
   $("parks").value = profile.park_share;
   $("gas").checked = profile.piped_gas;
+  $("temperature").value = profile.mean_temperature;
+  $("rainfall").value = profile.annual_rainfall;
+  $("bedrock").value = profile.bedrock_depth;
+  $("seismic").value = profile.seismic_risk;
+  $("relief").value = profile.relief;
   $("shape").value = profile.block_shape;
   $("irregularity").value = profile.street_irregularity;
   $("rivers").value = profile.rivers;

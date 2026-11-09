@@ -1,3 +1,4 @@
+use crate::environment::Environment;
 use crate::geometry::{Point, centroid};
 use crate::streets::StreetLayout;
 use crate::terrain::{Terrain, noise};
@@ -66,15 +67,28 @@ const MIN_DEPTH_CLEARANCE: f64 = 0.2;
 const TRUNK_OUTWARD_DISTANCE: f64 = 40.0;
 const UPHILL_FLOW_PENALTY: f64 = 40.0;
 const MIN_PIPE_RUN: f64 = 1.0;
+const MIN_TRENCH_MARGIN: f64 = 0.5;
+const FROST_FREE_TEMPERATURE: f64 = 8.0;
+const FROST_DEPTH_PER_DEGREE: f64 = 0.15;
+const MAX_FROST_DEPTH: f64 = 2.5;
+const MIN_RAINFALL_FOR_DRAINAGE: f64 = 250.0;
+
+/// Below the frost line nothing freezes, so cold climates push every buried
+/// network down together, which keeps their crossings clear of each other.
+pub fn frost_depth(mean_temperature: f64) -> f64 {
+    ((FROST_FREE_TEMPERATURE - mean_temperature) * FROST_DEPTH_PER_DEGREE)
+        .clamp(0.0, MAX_FROST_DEPTH)
+}
 
 pub fn default_specs(profile: &Profile) -> Vec<NetworkSpec> {
+    let frost = frost_depth(profile.mean_temperature);
     let mut specs = vec![
         NetworkSpec {
             id: "power".into(),
             label: "Energia".into(),
             color: "#f2b632".into(),
             topology: Topology::Radial,
-            depth: 0.7,
+            depth: 0.7 + frost,
             lateral_offset: 3.5,
             overhead_height: Some(9.0),
             requires: None,
@@ -87,7 +101,7 @@ pub fn default_specs(profile: &Profile) -> Vec<NetworkSpec> {
             topology: Topology::Looped {
                 booster_head: Some(15.0),
             },
-            depth: 1.2,
+            depth: 1.2 + frost,
             lateral_offset: -2.0,
             overhead_height: None,
             requires: Some("power".into()),
@@ -100,7 +114,7 @@ pub fn default_specs(profile: &Profile) -> Vec<NetworkSpec> {
             label: "Gás".into(),
             color: "#ff6b4a".into(),
             topology: Topology::Looped { booster_head: None },
-            depth: 0.95,
+            depth: 0.95 + frost,
             lateral_offset: 2.0,
             overhead_height: None,
             requires: None,
@@ -115,12 +129,28 @@ pub fn default_specs(profile: &Profile) -> Vec<NetworkSpec> {
             slope: 0.005,
             max_depth: 6.0,
         },
-        depth: 1.8,
+        depth: 1.8 + frost,
         lateral_offset: 0.0,
         overhead_height: None,
         requires: Some("power".into()),
         on_rupture: vec![RuptureEffect::Contamination],
     });
+    if profile.annual_rainfall >= MIN_RAINFALL_FOR_DRAINAGE {
+        specs.push(NetworkSpec {
+            id: "drainage".into(),
+            label: "Drenagem".into(),
+            color: "#46c2b0".into(),
+            topology: Topology::Gravity {
+                slope: 0.004,
+                max_depth: 6.0,
+            },
+            depth: 1.5 + frost,
+            lateral_offset: -4.5,
+            overhead_height: None,
+            requires: Some("power".into()),
+            on_rupture: vec![RuptureEffect::Flood],
+        });
+    }
     specs
 }
 
@@ -276,8 +306,7 @@ pub fn build_all(
     ports: &[Port],
     boundary: &[Point],
     layout: &StreetLayout,
-    terrain: &Terrain,
-    profile: &Profile,
+    environment: &Environment,
     overhead_seed: u64,
 ) -> Vec<Network> {
     let graph = Graph::new(layout);
@@ -290,7 +319,7 @@ pub fn build_all(
                 .map(|port| (port.at, port.level))
                 .collect();
             if own_ports.is_empty() {
-                own_ports.push((port_for(spec, boundary, terrain), None));
+                own_ports.push((port_for(spec, boundary, environment.terrain()), None));
             }
             let entries = own_ports
                 .iter()
@@ -301,8 +330,9 @@ pub fn build_all(
                 ports: own_ports,
                 entries,
                 graph: &graph,
-                terrain,
-                profile,
+                terrain: environment.terrain(),
+                profile: environment.profile(),
+                environment,
                 overhead_seed,
             };
             builder.build()
@@ -317,6 +347,7 @@ struct Builder<'a> {
     graph: &'a Graph<'a>,
     terrain: &'a Terrain,
     profile: &'a Profile,
+    environment: &'a Environment<'a>,
     overhead_seed: u64,
 }
 
@@ -466,7 +497,12 @@ impl Builder<'_> {
 
         for node in order {
             let (position, ground) = self.endpoint(node);
-            if ground - invert[node] > max_depth {
+            let excavation_limit = max_depth.min(
+                self.environment
+                    .rock_depth(position)
+                    .max(cover + MIN_TRENCH_MARGIN),
+            );
+            if ground - invert[node] > excavation_limit {
                 invert[node] = ground - cover;
                 pumps.push(node);
             }

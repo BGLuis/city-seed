@@ -105,13 +105,10 @@ fn neighbouring_districts_share_the_same_ground() {
 fn every_district_is_generated_and_served_by_every_network() {
     let city = city(11);
     assert!(city.districts.len() > 20);
+    let mut wooded = 0;
     for plan in &city.districts {
         let district = generate_district(&city, plan.id).expect("district generates");
-        assert!(
-            !district.buildings.is_empty(),
-            "district {} is empty",
-            plan.id
-        );
+        wooded += usize::from(district.buildings.is_empty());
         let snapshot = Simulation::new(&district).snapshot(&district);
         assert!(
             snapshot.outages.values().all(Vec::is_empty),
@@ -119,6 +116,10 @@ fn every_district_is_generated_and_served_by_every_network() {
             plan.id
         );
     }
+    assert!(
+        wooded * 4 <= city.districts.len(),
+        "{wooded} districts have no buildings"
+    );
     let snapshot = CitySession::new(city).snapshot();
     assert!(snapshot.trunk.outages.values().all(Vec::is_empty));
 }

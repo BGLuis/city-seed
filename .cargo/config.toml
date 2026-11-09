@@ -1,0 +1,3 @@
+[alias]
+perf = "run --release -p city-tools --bin city-perf --"
+maps = "run --release -p city-tools --bin city-map --"
