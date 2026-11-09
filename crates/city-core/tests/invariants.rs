@@ -185,8 +185,17 @@ fn a_fallen_overhead_line_ignites_a_nearby_gas_leak() {
     let mut input = DistrictInput::square(42, 1200.0);
     input.profile.overhead_share = 1.0;
     let district = generate(&input).expect("valid input");
+    let crossing = district
+        .street_nodes
+        .iter()
+        .map(|node| node.pos)
+        .min_by(|a, b| {
+            a.distance(point(600.0, 600.0))
+                .total_cmp(&b.distance(point(600.0, 600.0)))
+        })
+        .expect("district has streets");
     let event = Event::Destroy {
-        center: point(600.0, 600.0),
+        center: crossing,
         radius: 40.0,
         max_depth: 1.0,
     };

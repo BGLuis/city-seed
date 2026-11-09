@@ -1,10 +1,18 @@
-use crate::geometry::{Point, centroid, distance_to_segment, edges, point, signed_area};
-use crate::networks::{Network, NetworkSpec, Topology, build_all, default_specs, validate_specs};
+use crate::geometry::{Point, centroid, distance_to_segment, edges, point};
+use crate::networks::{
+    Network, NetworkSpec, Topology, build_all, default_specs, reject_transit, validate_specs,
+};
 use crate::rng::{Rng, fnv1a};
 use crate::sim::{EXPLOSION_MAX_DEPTH, EXPLOSION_RADIUS, Event, Grid, Simulation, Snapshot};
-use crate::streets::{self, ON_LINE_TOLERANCE, StreetEdge, StreetLayout, StreetNode};
+use crate::streets::{
+    self, Lattice, ON_LINE_TOLERANCE, StreetClass, StreetEdge, StreetLayout, StreetNode,
+    StreetOptions,
+};
 use crate::terrain::{Terrain, TerrainGrid, noise};
-use crate::{CityContext, District, DistrictInput, GenError, Port, Profile, SimError, generate};
+use crate::{
+    CityContext, District, DistrictInput, GenError, Port, Profile, SimError, generate, regions,
+    rivers, transit, validate_profile,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -12,9 +20,7 @@ use std::fmt;
 const MIN_POPULATION: u64 = 1_000;
 const MAX_POPULATION: u64 = 40_000_000;
 const GROSS_DENSITY_PER_SQUARE_METER: f64 = 0.003;
-const DENSE_DISTRICT_AREA: f64 = 1.5e6;
-const SPARSE_DISTRICT_AREA: f64 = 6.0e6;
-const INDEX_CELL: f64 = 1_200.0;
+const DISTRICT_AREA: f64 = 3.5e6;
 const SUB_CENTER_SPACING: f64 = 25_000.0;
 const TRUNK_SLOPE_FACTOR: f64 = 0.2;
 const TRUNK_DEPTH_FACTOR: f64 = 2.5;
@@ -23,6 +29,8 @@ const TRUNK_DEPTH_FACTOR: f64 = 2.5;
 pub struct CityInput {
     pub seed: u64,
     pub population: u64,
+    #[serde(default)]
+    pub region: Option<String>,
     #[serde(default)]
     pub profile: Profile,
     #[serde(default)]
@@ -136,10 +144,17 @@ pub fn generate_city(input: &CityInput) -> Result<City, GenError> {
     if !(MIN_POPULATION..=MAX_POPULATION).contains(&input.population) {
         return Err(GenError::InvalidPopulation);
     }
+    validate_profile(&input.profile)?;
+    let seed = match &input.region {
+        Some(id) => {
+            regions::find(id).ok_or_else(|| GenError::UnknownRegion(id.clone()))?;
+            Rng::derive(input.seed, id).next_u64()
+        }
+        None => input.seed,
+    };
     let mut specs = default_specs(&input.profile);
     specs.extend(input.extra_networks.iter().cloned());
-    validate_specs(&specs)?;
-    let trunk_specs: Vec<NetworkSpec> = specs.iter().map(trunk_spec).collect();
+    reject_transit(&specs)?;
 
     let side = (input.population as f64 / GROSS_DENSITY_PER_SQUARE_METER).sqrt();
     let boundary = vec![
@@ -148,36 +163,53 @@ pub fn generate_city(input: &CityInput) -> Result<City, GenError> {
         point(side, side),
         point(0.0, side),
     ];
-    let terrain = Terrain::new(input.seed);
-    let density = DensityField::new(input.seed, side);
-    let is_district = |polygon: &[Point], rng: &mut Rng| {
-        let crowding = density.at(centroid(polygon));
-        let target = SPARSE_DISTRICT_AREA + (DENSE_DISTRICT_AREA - SPARSE_DISTRICT_AREA) * crowding;
-        signed_area(polygon) <= target * rng.range(0.8, 1.3)
-    };
-    let layout = streets::build_with(
+    let terrain = Terrain::new(seed);
+    let density = DensityField::new(seed, side);
+    let rivers = rivers::generate(seed, input.profile.rivers, side, &terrain);
+    let layout = streets::build(
         &boundary,
-        is_district,
-        u32::MAX,
-        INDEX_CELL,
+        &StreetOptions {
+            lattice: Lattice {
+                block_area: DISTRICT_AREA,
+                shape: input.profile.block_shape,
+                irregularity: input.profile.street_irregularity,
+            },
+            interior: StreetClass::Arterial,
+            bridge_every: 1,
+            rivers: &rivers,
+        },
         &terrain,
-        &mut Rng::derive(input.seed, "macro"),
+        &mut Rng::derive(seed, "macro"),
     );
 
+    let mut trunk_specs: Vec<NetworkSpec> = specs.iter().map(trunk_spec).collect();
     let ports = facility_ports(&trunk_specs, &layout, &density, side);
-    let networks = build_all(
+    let mut networks = build_all(
         &trunk_specs,
         &ports,
         &boundary,
         &layout,
         &terrain,
         &input.profile,
-        Rng::derive(input.seed, "trunk-overhead").next_u64(),
+        Rng::derive(seed, "trunk-overhead").next_u64(),
     );
-    let districts = plan_districts(&specs, &layout, &networks, &density);
+    let lines = transit::build(
+        &layout,
+        &density,
+        &input.profile,
+        input.population,
+        side,
+        &mut Rng::derive(seed, "transit"),
+    );
+    for (spec, network) in lines.networks {
+        trunk_specs.push(spec);
+        networks.push(network);
+    }
+    validate_specs(&trunk_specs)?;
+    let districts = plan_districts(&trunk_specs, &layout, &networks, &density);
 
     Ok(City {
-        seed: input.seed,
+        seed,
         population: input.population,
         terrain: terrain.grid(&boundary),
         boundary,
@@ -189,8 +221,10 @@ pub fn generate_city(input: &CityInput) -> Result<City, GenError> {
         networks,
         profile: input.profile.clone(),
         context: CityContext {
-            terrain_seed: input.seed,
+            terrain_seed: seed,
             density,
+            rivers,
+            rails: lines.rails,
         },
     })
 }
@@ -212,6 +246,7 @@ fn districts_per_facility(topology: &Topology) -> usize {
         Topology::Radial => 8,
         Topology::Looped { .. } => 25,
         Topology::Gravity { .. } => 20,
+        Topology::Transit => unreachable!("transit has lines, not facilities"),
     }
 }
 
@@ -290,6 +325,13 @@ fn plan_districts(
                 .iter()
                 .enumerate()
                 .map(|(index, spec)| {
+                    if spec.topology == Topology::Transit {
+                        return DistrictPort {
+                            network: spec.id.clone(),
+                            node: nearest_station(&networks[index], layout, centroid(polygon)),
+                            level: None,
+                        };
+                    }
                     let chosen = on_boundary.iter().copied().reduce(|best, node| {
                         let lower = elevation(&node) < elevation(&best);
                         let wants_low = matches!(spec.topology, Topology::Gravity { .. });
@@ -313,6 +355,19 @@ fn plan_districts(
         .collect()
 }
 
+fn nearest_station(line: &Network, layout: &StreetLayout, p: Point) -> usize {
+    line.powered_nodes
+        .iter()
+        .copied()
+        .min_by(|a, b| {
+            layout.nodes[*a]
+                .pos
+                .distance(p)
+                .total_cmp(&layout.nodes[*b].pos.distance(p))
+        })
+        .expect("lines have stations")
+}
+
 pub fn district_input(city: &City, id: usize) -> Result<DistrictInput, GenError> {
     let plan = city
         .districts
@@ -326,6 +381,7 @@ pub fn district_input(city: &City, id: usize) -> Result<DistrictInput, GenError>
         ports: plan
             .ports
             .iter()
+            .take(city.specs.len())
             .map(|port| Port {
                 network: port.network.clone(),
                 at: city.nodes[port.node].pos,
@@ -573,7 +629,9 @@ impl CitySession {
     fn sync_supply(&mut self) {
         let served = self.trunk.service(&self.city);
         for (id, detailed) in &mut self.detailed {
-            for (network, port) in self.city.districts[*id].ports.iter().enumerate() {
+            let local_networks = detailed.district.networks.len();
+            let ports = self.city.districts[*id].ports.iter().take(local_networks);
+            for (network, port) in ports.enumerate() {
                 detailed
                     .simulation
                     .set_supply(network, served[network][port.node]);

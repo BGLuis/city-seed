@@ -20,6 +20,7 @@ const HAZARDS = {
 const BASE_LAYERS = [
   ["terrain", "Terreno"],
   ["streets", "Ruas"],
+  ["water", "Rios"],
   ["buildings", "Prédios"],
   ["hazards", "Riscos"],
 ];
@@ -35,6 +36,7 @@ let view = { scale: 1, x: 0, y: 0 };
 let terrainImage = null;
 let cityPaths = null;
 let drawQueued = false;
+let regions = [];
 const locals = new Map();
 const visible = {};
 const canvas = $("map");
@@ -67,14 +69,21 @@ function checked(pointer) {
 
 function generate() {
   $("error").textContent = "";
+  const region = $("region").value;
   const input = {
     seed: Number($("seed").value),
     population: Number($("population").value),
+    region,
     profile: {
       overhead_share: Number($("overhead").value),
       piped_gas: $("gas").checked,
       park_share: Number($("parks").value),
       density: 0.5,
+      block_shape: Number($("shape").value),
+      street_irregularity: Number($("irregularity").value),
+      rivers: Number($("rivers").value),
+      metro_density: Number($("metro").value),
+      rail_density: Number($("rail").value),
     },
   };
   const started = performance.now();
@@ -88,7 +97,7 @@ function generate() {
   session = next;
   city = JSON.parse(takeString(wasm.city_json(session)));
   snapshot = JSON.parse(checked(wasm.city_snapshot(session)));
-  $("hash").textContent = `hash ${takeString(wasm.city_hash_hex(session))} · gerada em ${elapsed.toFixed(0)} ms`;
+  $("hash").textContent = `${region}:${input.seed} · hash ${takeString(wasm.city_hash_hex(session))} · gerada em ${elapsed.toFixed(0)} ms`;
   selected = null;
   locals.clear();
   buildTerrain();
@@ -98,7 +107,7 @@ function generate() {
 }
 
 function buildLayers() {
-  const entries = [...BASE_LAYERS, ...city.specs.map((s) => [s.id, s.label, s.color])];
+  const entries = [...BASE_LAYERS, ...city.trunk_specs.map((s) => [s.id, s.label, s.color])];
   $("layers").replaceChildren(
     ...entries.map(([id, label, color]) => {
       visible[id] ??= true;
@@ -168,9 +177,7 @@ function networkPaths(networks, specs, broken, nodes) {
     network.segments.forEach((segment, segmentIndex) => {
       const target = brokenSet.has(segmentIndex) ? paths.broken : segment.overhead ? paths.overhead : paths.buried;
       segmentPath(target, segment, spec.lateral_offset);
-      if (segment.street_edge === null) {
-        paths.sources.push(network.sources.includes(segment.a) ? segment.pa : segment.pb);
-      }
+      if (segment.street_edge === null && network.sources.includes(segment.a)) paths.sources.push(segment.pa);
     });
     paths.pumps = network.powered_nodes.map((node) => nodes[node].pos);
     return paths;
@@ -190,13 +197,31 @@ function buildCityPaths() {
     polygonPath(fills.get(bucket), district.polygon);
   }
   const roads = new Path2D();
+  const bridges = new Path2D();
   for (const edge of city.edges) {
     const a = city.nodes[edge.a].pos;
     const b = city.nodes[edge.b].pos;
-    roads.moveTo(a.x, a.y);
-    roads.lineTo(b.x, b.y);
+    const target = edge.bridge ? bridges : roads;
+    target.moveTo(a.x, a.y);
+    target.lineTo(b.x, b.y);
   }
-  cityPaths = { fills, lostPath, outlines, roads, networks: networkPaths(city.networks, city.specs, snapshot.trunk.broken, city.nodes) };
+  const lines = (polylines) => {
+    const path = new Path2D();
+    for (const line of polylines) {
+      line.forEach((p, i) => (i ? path.lineTo(p.x, p.y) : path.moveTo(p.x, p.y)));
+    }
+    return path;
+  };
+  cityPaths = {
+    fills,
+    lostPath,
+    outlines,
+    roads,
+    bridges,
+    rivers: lines(city.context.rivers),
+    rails: lines(city.context.rails),
+    networks: networkPaths(city.networks, city.trunk_specs, snapshot.trunk.broken, city.nodes),
+  };
 }
 
 function buildLocalPaths(entry, id) {
@@ -221,17 +246,21 @@ function buildLocalPaths(entry, id) {
     }
   });
   const parks = new Path2D();
+  const water = new Path2D();
+  const railBeds = new Path2D();
   for (const lot of district.lots) {
-    if (lot.land_use === "park") polygonPath(parks, lot.polygon);
+    const target = { park: parks, water, rail: railBeds }[lot.land_use];
+    if (target) polygonPath(target, lot.polygon);
   }
-  const streets = { arterial: new Path2D(), local: new Path2D() };
+  const streets = { arterial: new Path2D(), local: new Path2D(), bridge: new Path2D() };
   for (const edge of district.street_edges) {
     const a = district.street_nodes[edge.a].pos;
     const b = district.street_nodes[edge.b].pos;
-    streets[edge.class].moveTo(a.x, a.y);
-    streets[edge.class].lineTo(b.x, b.y);
+    const target = edge.bridge ? streets.bridge : streets[edge.class];
+    target.moveTo(a.x, a.y);
+    target.lineTo(b.x, b.y);
   }
-  entry.paths = { buildings, lostPath, destroyedPath, parks, streets, networks: networkPaths(district.networks, district.specs, state.broken, district.street_nodes) };
+  entry.paths = { buildings, lostPath, destroyedPath, parks, water, railBeds, streets, networks: networkPaths(district.networks, district.specs, state.broken, district.street_nodes) };
 }
 
 function refreshState() {
@@ -325,6 +354,12 @@ function strokeNetwork(paths, pixelWidth) {
 
 function drawLocal(entry) {
   const { paths } = entry;
+  if (visible.water) {
+    ctx.fillStyle = "#1f5f8f";
+    ctx.fill(paths.water);
+  }
+  ctx.fillStyle = "#4a4640";
+  ctx.fill(paths.railBeds);
   if (visible.streets) {
     ctx.lineCap = "round";
     ctx.strokeStyle = "#39433f";
@@ -332,6 +367,9 @@ function drawLocal(entry) {
     ctx.stroke(paths.streets.arterial);
     ctx.lineWidth = 12;
     ctx.stroke(paths.streets.local);
+    ctx.strokeStyle = "#a8a08c";
+    ctx.lineWidth = 14;
+    ctx.stroke(paths.streets.bridge);
   }
   ctx.fillStyle = "#2f6a45";
   ctx.fill(paths.parks);
@@ -378,10 +416,19 @@ function draw() {
   }
   ctx.fillStyle = "rgba(210,122,70,.65)";
   ctx.fill(cityPaths.lostPath);
+  if (visible.water) {
+    ctx.strokeStyle = "#1f5f8f";
+    ctx.lineWidth = Math.max(2 * px, 250);
+    ctx.lineJoin = "round";
+    ctx.stroke(cityPaths.rivers);
+  }
   if (visible.streets) {
     ctx.strokeStyle = "#566660";
     ctx.lineWidth = Math.max(px, 24);
     ctx.stroke(cityPaths.roads);
+    ctx.strokeStyle = "#c7bfa8";
+    ctx.lineWidth = Math.max(1.5 * px, 30);
+    ctx.stroke(cityPaths.bridges);
   }
 
   const showDetail = view.scale >= LOCAL_DETAIL_SCALE;
@@ -507,7 +554,7 @@ function drawStats() {
     row("Detalhados", locals.size),
     row("Prédios detalhados", sum([...locals.values()].map((e) => e.data.buildings.length))),
     row("Prédios destruídos", sum(states.map((s) => s.destroyed.length))),
-    ...city.specs.map((spec) => row(`Distritos sem ${spec.label.toLowerCase()}`, snapshot.trunk.outages[spec.id].length)),
+    ...city.trunk_specs.map((spec) => row(`Distritos sem ${spec.label.toLowerCase()}`, snapshot.trunk.outages[spec.id].length)),
     ...city.specs.map((spec) => row(`Prédios sem ${spec.label.toLowerCase()}`, sum(states.map((s) => s.outages[spec.id].length)))),
     ...Object.entries(HAZARDS).map(([kind, [, label]]) => row(label, hazards.filter((h) => h.kind === kind).length)),
   ];
@@ -630,6 +677,22 @@ canvas.addEventListener(
   },
   { passive: false },
 );
+function applyRegion() {
+  const { profile } = regions.find((r) => r.id === $("region").value);
+  $("overhead").value = profile.overhead_share;
+  $("parks").value = profile.park_share;
+  $("gas").checked = profile.piped_gas;
+  $("shape").value = profile.block_shape;
+  $("irregularity").value = profile.street_irregularity;
+  $("rivers").value = profile.rivers;
+  $("metro").value = profile.metro_density;
+  $("rail").value = profile.rail_density;
+}
+
+$("region").onchange = () => {
+  applyRegion();
+  generate();
+};
 $("preset").onchange = () => {
   $("population").value = $("preset").value;
   generate();
@@ -649,6 +712,16 @@ window.addEventListener("resize", resize);
 (async () => {
   const bytes = await (await fetch("city.wasm")).arrayBuffer();
   wasm = (await WebAssembly.instantiate(bytes, {})).instance.exports;
+  regions = JSON.parse(takeString(wasm.city_regions()));
+  $("region").replaceChildren(
+    ...regions.map((region) => {
+      const option = document.createElement("option");
+      option.value = region.id;
+      option.textContent = region.label;
+      return option;
+    }),
+  );
+  applyRegion();
   generate();
   window.cityReady = true;
 })();

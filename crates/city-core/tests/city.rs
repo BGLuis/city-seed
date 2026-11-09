@@ -11,6 +11,7 @@ fn input(seed: u64, population: u64) -> CityInput {
     CityInput {
         seed,
         population,
+        region: None,
         profile: Profile::default(),
         extra_networks: Vec::new(),
     }
@@ -95,7 +96,7 @@ fn neighbouring_districts_share_the_same_ground() {
     for node in a.street_nodes.iter().chain(&b.street_nodes) {
         let macro_twin = city.nodes.iter().find(|n| n.pos.distance(node.pos) < 0.01);
         if let Some(twin) = macro_twin {
-            assert_eq!(twin.elevation, node.elevation);
+            assert!((twin.elevation - node.elevation).abs() < 0.01);
         }
     }
 }

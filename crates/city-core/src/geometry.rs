@@ -115,6 +115,40 @@ pub fn inset_edges(polygon: &[Point], distances: &[f64]) -> Vec<Point> {
     inset
 }
 
+pub fn point_in_convex(p: Point, polygon: &[Point]) -> bool {
+    edges(polygon).all(|(a, b)| (b - a).cross(p - a) >= 0.0)
+}
+
+pub fn segments_cross(a: Point, b: Point, c: Point, d: Point) -> bool {
+    let span = b - a;
+    let other = d - c;
+    span.cross(c - a) * span.cross(d - a) < 0.0 && other.cross(a - c) * other.cross(b - c) < 0.0
+}
+
+pub fn polyline_touches_polygon(polyline: &[Point], polygon: &[Point]) -> bool {
+    polyline.windows(2).any(|piece| {
+        point_in_convex(piece[0], polygon)
+            || point_in_convex(piece[1], polygon)
+            || edges(polygon).any(|(a, b)| segments_cross(piece[0], piece[1], a, b))
+    })
+}
+
+pub fn without_short_edges(polygon: &[Point], minimum: f64) -> Vec<Point> {
+    let mut cleaned: Vec<Point> = Vec::with_capacity(polygon.len());
+    for p in polygon {
+        if cleaned
+            .last()
+            .is_none_or(|last| last.distance(*p) >= minimum)
+        {
+            cleaned.push(*p);
+        }
+    }
+    while cleaned.len() > 1 && cleaned[0].distance(cleaned[cleaned.len() - 1]) < minimum {
+        cleaned.pop();
+    }
+    cleaned
+}
+
 pub fn distance_to_segment(p: Point, a: Point, b: Point) -> f64 {
     let span = b - a;
     let squared = span.dot(span);

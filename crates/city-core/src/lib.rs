@@ -2,28 +2,38 @@ pub mod city;
 pub mod geometry;
 pub mod networks;
 pub mod parcels;
+pub mod regions;
+pub mod rivers;
 pub mod rng;
 pub mod sim;
 pub mod spatial;
 pub mod streets;
 pub mod terrain;
+pub mod transit;
 
 use city::DensityField;
 use geometry::{Point, is_convex_ccw, point, signed_area};
-use networks::{Network, NetworkSpec, default_specs, validate_specs};
-use parcels::{Building, Lot};
+use networks::{Network, NetworkSpec, default_specs, reject_transit, validate_specs};
+use parcels::{Building, Corridors, Lot};
 use rng::{Rng, fnv1a};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use streets::{StreetEdge, StreetNode};
+use streets::{Lattice, StreetClass, StreetEdge, StreetNode, StreetOptions};
 use terrain::{Terrain, TerrainGrid};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Profile {
     pub overhead_share: f64,
     pub piped_gas: bool,
     pub park_share: f64,
     pub density: f64,
+    /// 0 is a rectangular grid, 1 a honeycomb, anything between is a blend.
+    pub block_shape: f64,
+    pub street_irregularity: f64,
+    pub rivers: u32,
+    pub metro_density: f64,
+    pub rail_density: f64,
 }
 
 impl Default for Profile {
@@ -33,6 +43,11 @@ impl Default for Profile {
             piped_gas: true,
             park_share: 0.08,
             density: 0.5,
+            block_shape: 0.0,
+            street_irregularity: 0.3,
+            rivers: 0,
+            metro_density: 0.0,
+            rail_density: 0.0,
         }
     }
 }
@@ -53,6 +68,8 @@ pub struct Port {
 pub struct CityContext {
     pub terrain_seed: u64,
     pub density: DensityField,
+    pub rivers: Vec<Vec<Point>>,
+    pub rails: Vec<Vec<Point>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -107,7 +124,10 @@ pub struct District {
 pub enum GenError {
     InvalidBoundary,
     InvalidPopulation,
+    InvalidProfile,
+    UnknownRegion(String),
     UnknownDistrict(usize),
+    TransitNotConfigurable(String),
     DuplicateNetwork(String),
     UnknownDependency { network: String, requires: String },
     DepthConflict(String, String),
@@ -131,7 +151,20 @@ impl fmt::Display for GenError {
             GenError::InvalidPopulation => {
                 write!(f, "population must be between 1 thousand and 40 million")
             }
+            GenError::InvalidProfile => {
+                write!(
+                    f,
+                    "block_shape and street_irregularity must be between 0 and 1"
+                )
+            }
+            GenError::UnknownRegion(id) => write!(f, "unknown region '{id}'"),
             GenError::UnknownDistrict(id) => write!(f, "unknown district {id}"),
+            GenError::TransitNotConfigurable(id) => {
+                write!(
+                    f,
+                    "network '{id}': transit lines are routed by the city generator"
+                )
+            }
             GenError::DuplicateNetwork(id) => write!(f, "duplicate network '{id}'"),
             GenError::UnknownDependency { network, requires } => {
                 write!(
@@ -161,6 +194,16 @@ impl fmt::Display for SimError {
 const MIN_DISTRICT_AREA: f64 = 1.0e4;
 const MAX_DISTRICT_AREA: f64 = 4.0e8;
 const BASE_BLOCK_AREA: f64 = 16_000.0;
+const LOCAL_BRIDGE_SPACING: usize = 5;
+
+pub fn validate_profile(profile: &Profile) -> Result<(), GenError> {
+    let unit = 0.0..=1.0;
+    if unit.contains(&profile.block_shape) && unit.contains(&profile.street_irregularity) {
+        Ok(())
+    } else {
+        Err(GenError::InvalidProfile)
+    }
+}
 
 pub fn generate(input: &DistrictInput) -> Result<District, GenError> {
     let area = signed_area(&input.boundary);
@@ -177,13 +220,28 @@ pub fn generate(input: &DistrictInput) -> Result<District, GenError> {
         .unwrap_or_else(|| default_specs(&input.profile));
     specs.extend(input.extra_networks.iter().cloned());
     validate_specs(&specs)?;
+    reject_transit(&specs)?;
+    validate_profile(&input.profile)?;
 
     let context = input.context.as_ref();
     let terrain = Terrain::new(context.map_or(input.seed, |c| c.terrain_seed));
     let block_area = BASE_BLOCK_AREA * (1.4 - 0.8 * input.profile.density);
+    let corridors = Corridors {
+        rivers: context.map_or(&[], |c| &c.rivers),
+        rails: context.map_or(&[], |c| &c.rails),
+    };
     let layout = streets::build(
         &input.boundary,
-        block_area,
+        &StreetOptions {
+            lattice: Lattice {
+                block_area,
+                shape: input.profile.block_shape,
+                irregularity: input.profile.street_irregularity,
+            },
+            interior: StreetClass::Local,
+            bridge_every: LOCAL_BRIDGE_SPACING,
+            rivers: corridors.rivers,
+        },
         &terrain,
         &mut Rng::derive(input.seed, "streets"),
     );
@@ -192,6 +250,7 @@ pub fn generate(input: &DistrictInput) -> Result<District, GenError> {
         &layout,
         &input.profile,
         context.map(|c| &c.density),
+        &corridors,
         &mut Rng::derive(input.seed, "parcels"),
     );
     let networks = networks::build_all(

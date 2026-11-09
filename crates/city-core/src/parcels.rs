@@ -2,7 +2,7 @@ use crate::Profile;
 use crate::city::DensityField;
 use crate::geometry::{
     Point, centroid, clip_band, distance_to_segment, edges, extent, inset_edges,
-    longest_edge_direction, signed_area,
+    longest_edge_direction, polyline_touches_polygon, signed_area,
 };
 use crate::rng::Rng;
 use crate::streets::StreetLayout;
@@ -16,6 +16,14 @@ pub enum LandUse {
     Commercial,
     Industrial,
     Park,
+    Water,
+    Rail,
+}
+
+/// Linear features that claim whole blocks from development.
+pub struct Corridors<'a> {
+    pub rivers: &'a [Vec<Point>],
+    pub rails: &'a [Vec<Point>],
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -44,6 +52,7 @@ pub fn subdivide(
     layout: &StreetLayout,
     profile: &Profile,
     city_density: Option<&DensityField>,
+    corridors: &Corridors,
     rng: &mut Rng,
 ) -> (Vec<Lot>, Vec<Building>) {
     let center = centroid(boundary);
@@ -56,6 +65,25 @@ pub fn subdivide(
     let mut buildings = Vec::new();
 
     for block in &layout.blocks {
+        let touches = |lines: &[Vec<Point>]| {
+            lines
+                .iter()
+                .any(|line| polyline_touches_polygon(line, block))
+        };
+        let claimed = if touches(corridors.rivers) {
+            Some(LandUse::Water)
+        } else if touches(corridors.rails) {
+            Some(LandUse::Rail)
+        } else {
+            None
+        };
+        if let Some(land_use) = claimed {
+            lots.push(Lot {
+                polygon: block.clone(),
+                land_use,
+            });
+            continue;
+        }
         let setbacks: Vec<f64> = edges(block)
             .map(|(a, b)| street_setback(a, b, layout))
             .collect();
@@ -136,7 +164,7 @@ fn split_lots(buildable: &[Point], land_use: LandUse, rng: &mut Rng) -> Vec<Vec<
     let target = match land_use {
         LandUse::Commercial => 28.0,
         LandUse::Industrial => 50.0,
-        LandUse::Residential | LandUse::Park => 16.0,
+        LandUse::Residential | LandUse::Park | LandUse::Water | LandUse::Rail => 16.0,
     };
 
     let mut result = Vec::new();
@@ -174,7 +202,7 @@ fn floors(land_use: LandUse, value: f64, profile: &Profile, rng: &mut Rng) -> u3
         LandUse::Commercial => rng.range(5.0, 40.0) * value * value * scale,
         LandUse::Residential => rng.range(2.0, 12.0) * value * scale,
         LandUse::Industrial => rng.range(1.0, 3.0),
-        LandUse::Park => 0.0,
+        LandUse::Park | LandUse::Water | LandUse::Rail => 0.0,
     };
     (height as u32).max(1)
 }

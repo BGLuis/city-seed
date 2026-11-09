@@ -76,6 +76,21 @@ impl SpatialIndex {
         best.map(|(_, index)| index)
     }
 
+    /// Points within `radius` of `p`, ascending by index.
+    pub fn within(&self, p: Point, radius: f64) -> Vec<usize> {
+        let (center_x, center_y) = self.key(p);
+        let reach = (radius / self.cell).ceil() as i64;
+        let mut found: Vec<usize> = (-reach..=reach)
+            .flat_map(|dy| (-reach..=reach).map(move |dx| (center_x + dx, center_y + dy)))
+            .filter_map(|cell| self.cells.get(&cell))
+            .flatten()
+            .copied()
+            .filter(|index| self.points[*index].distance(p) <= radius)
+            .collect();
+        found.sort_unstable();
+        found
+    }
+
     /// Points within `tolerance` of the segment, ascending by index.
     pub fn on_segment(&self, a: Point, b: Point, tolerance: f64) -> Vec<usize> {
         let steps = (a.distance(b) / self.cell).ceil() as usize + 1;

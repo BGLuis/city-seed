@@ -222,7 +222,7 @@ impl Simulation {
             let mut reached = vec![false; network.node_count];
             let mut stack = Vec::new();
             if self.supply[index] {
-                for source in &network.sources {
+                for source in network.sources.iter().filter(|s| !gated[**s]) {
                     reached[*source] = true;
                     stack.push(*source);
                 }

@@ -12,6 +12,7 @@ pub enum Topology {
     Radial,
     Looped { booster_head: Option<f64> },
     Gravity { slope: f64, max_depth: f64 },
+    Transit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -148,6 +149,15 @@ pub fn validate_specs(specs: &[NetworkSpec]) -> Result<(), GenError> {
     Ok(())
 }
 
+/// Transit lines need the whole city's graph, so districts and user networks
+/// cannot declare them.
+pub fn reject_transit(specs: &[NetworkSpec]) -> Result<(), GenError> {
+    match specs.iter().find(|s| s.topology == Topology::Transit) {
+        Some(spec) => Err(GenError::TransitNotConfigurable(spec.id.clone())),
+        None => Ok(()),
+    }
+}
+
 pub fn port_for(spec: &NetworkSpec, boundary: &[Point], terrain: &Terrain) -> Point {
     let by_height = |a: &&Point, b: &&Point| terrain.height(**a).total_cmp(&terrain.height(**b));
     let vertex = match spec.topology {
@@ -159,9 +169,9 @@ pub fn port_for(spec: &NetworkSpec, boundary: &[Point], terrain: &Terrain) -> Po
     *vertex + (*vertex - center).normalized() * TRUNK_OUTWARD_DISTANCE
 }
 
-struct Frontier {
-    cost: f64,
-    node: usize,
+pub(crate) struct Frontier {
+    pub(crate) cost: f64,
+    pub(crate) node: usize,
 }
 
 impl Ord for Frontier {
@@ -188,13 +198,13 @@ impl PartialEq for Frontier {
 
 impl Eq for Frontier {}
 
-struct Graph<'a> {
+pub(crate) struct Graph<'a> {
     layout: &'a StreetLayout,
     adjacency: Vec<Vec<(usize, usize)>>,
 }
 
 impl<'a> Graph<'a> {
-    fn new(layout: &'a StreetLayout) -> Self {
+    pub(crate) fn new(layout: &'a StreetLayout) -> Self {
         let mut adjacency = vec![Vec::new(); layout.nodes.len()];
         for (index, edge) in layout.edges.iter().enumerate() {
             adjacency[edge.a].push((edge.b, index));
@@ -203,7 +213,7 @@ impl<'a> Graph<'a> {
         Self { layout, adjacency }
     }
 
-    fn nearest_node(&self, p: Point) -> usize {
+    pub(crate) fn nearest_node(&self, p: Point) -> usize {
         self.layout
             .index
             .nearest(p)
@@ -211,7 +221,11 @@ impl<'a> Graph<'a> {
     }
 
     /// Grows one shortest-path tree per root; each node joins its cheapest root.
-    fn shortest_forest(&self, roots: &[usize], cost: impl Fn(usize, usize) -> f64) -> Forest {
+    pub(crate) fn shortest_forest(
+        &self,
+        roots: &[usize],
+        cost: impl Fn(usize, usize) -> f64,
+    ) -> Forest {
         let count = self.layout.nodes.len();
         let mut distance = vec![f64::MAX; count];
         let mut next_hop = vec![None; count];
@@ -251,10 +265,10 @@ impl<'a> Graph<'a> {
     }
 }
 
-struct Forest {
-    distance: Vec<f64>,
-    next_hop: Vec<Option<(usize, usize)>>,
-    owner: Vec<usize>,
+pub(crate) struct Forest {
+    pub(crate) distance: Vec<f64>,
+    pub(crate) next_hop: Vec<Option<(usize, usize)>>,
+    pub(crate) owner: Vec<usize>,
 }
 
 pub fn build_all(
@@ -312,6 +326,7 @@ impl Builder<'_> {
             Topology::Radial => self.radial(),
             Topology::Looped { booster_head } => self.looped(booster_head),
             Topology::Gravity { slope, max_depth } => self.gravity(slope, max_depth),
+            Topology::Transit => unreachable!("rejected by reject_transit"),
         }
     }
 
@@ -348,7 +363,7 @@ impl Builder<'_> {
             _ => (
                 ground_a - self.spec.depth,
                 ground_b - self.spec.depth,
-                self.spec.depth,
+                self.exposure(self.spec.depth, street_edge),
             ),
         };
         Segment {
@@ -361,6 +376,15 @@ impl Builder<'_> {
             depth,
             overhead,
             street_edge,
+        }
+    }
+
+    /// Anything carried on a bridge hangs in the open, whatever its nominal depth.
+    fn exposure(&self, depth: f64, street_edge: Option<usize>) -> f64 {
+        if street_edge.is_some_and(|edge| self.layout().edges[edge].bridge) {
+            0.0
+        } else {
+            depth
         }
     }
 
@@ -466,7 +490,7 @@ impl Builder<'_> {
                 pb: target_position,
                 za: invert[node],
                 zb: arrival,
-                depth: ground - invert[node],
+                depth: self.exposure(ground - invert[node], edge),
                 overhead: false,
                 street_edge: edge,
             });

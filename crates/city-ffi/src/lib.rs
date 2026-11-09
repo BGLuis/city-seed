@@ -3,6 +3,7 @@
 //! strings returned here must be released with `city_string_free`.
 
 use city_core::city::{CityEvent, CityInput, CitySession, city_hash, generate_city};
+use city_core::regions::regions;
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
 use std::ptr::null_mut;
@@ -39,6 +40,12 @@ unsafe fn parse<T: serde::de::DeserializeOwned>(text: *const c_char) -> Option<T
 
 fn json<T: serde::Serialize>(value: &T) -> *mut c_char {
     to_c(serde_json::to_string(value).expect("model serializes"))
+}
+
+/// The regional presets, each with the profile to send to `city_generate`.
+#[unsafe(no_mangle)]
+pub extern "C" fn city_regions() -> *mut c_char {
+    json(&regions())
 }
 
 /// Returns a session, or null with `city_last_error` set.
