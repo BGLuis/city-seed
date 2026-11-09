@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path as FsPath;
 use tiny_skia::{
-    Color, FillRule, FilterQuality, Paint, Path, PathBuilder, Pixmap, PixmapPaint,
+    Color, FillRule, FilterQuality, LineCap, Paint, Path, PathBuilder, Pixmap, PixmapPaint,
     PremultipliedColorU8, Stroke, Transform,
 };
 
@@ -70,6 +70,7 @@ impl Atlas {
         };
         let stroke = Stroke {
             width: width.max(0.6),
+            line_cap: LineCap::Round,
             ..Stroke::default()
         };
         sheet

@@ -18,6 +18,8 @@
   <img alt="JavaScript" src="https://shieldcn.dev/badge/Language-JavaScript-F7DF1E.svg?logo=javascript&variant=branded&size=sm" />
 </p>
 
+<p align="center"><a href="docs/EXAMPLES.pt-BR.md"><b>🏙️ Veja exemplos de cidades</b></a></p>
+
 # 📖 Sobre
 
 City Seed é um gerador procedural e determinístico de cidades escrito em Rust. A partir de uma seed, de uma população (de um bairro pequeno até cerca de 40 milhões de pessoas) e de um perfil regional, ele sempre produz a mesma cidade.
