@@ -2,7 +2,10 @@
 //! engines (Unity via P/Invoke). All strings are NUL-terminated UTF-8 JSON;
 //! strings returned here must be released with `city_string_free`.
 
-use city_core::city::{CityEvent, CityInput, CitySession, city_hash, generate_city};
+use city_core::city::{
+    CityEvent, CityInput, CitySession, city_hash, generate_city, generate_district,
+};
+use city_core::mesh::{CityMesh, Vertex, city_mesh, district_mesh, mesh_hash};
 use city_core::regions::regions;
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
@@ -134,6 +137,80 @@ pub unsafe extern "C" fn city_apply_event(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn city_reset(session: *mut CitySession) -> *mut c_char {
     json(&unsafe { &mut *session }.reset())
+}
+
+/// The whole city at low detail. Free with `city_mesh_free`.
+///
+/// # Safety
+/// `session` must come from `city_generate` and not have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn city_mesh_macro(session: *const CitySession) -> *mut CityMesh {
+    Box::into_raw(Box::new(city_mesh(unsafe { &*session }.city())))
+}
+
+/// Full detail for one district, or null with `city_last_error` set. The
+/// district is not kept in the session, so meshes can be streamed indefinitely.
+///
+/// # Safety
+/// `session` must come from `city_generate` and not have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn city_mesh_district(
+    session: *const CitySession,
+    district: usize,
+) -> *mut CityMesh {
+    let city = unsafe { &*session }.city();
+    match generate_district(city, district) {
+        Ok(detailed) => Box::into_raw(Box::new(district_mesh(city, district, &detailed))),
+        Err(error) => {
+            fail(error.to_string());
+            null_mut()
+        }
+    }
+}
+
+/// JSON with the origin and, per layer, its id, counts, bounds and tiles.
+///
+/// # Safety
+/// `mesh` must come from `city_mesh_macro` or `city_mesh_district`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn city_mesh_info(mesh: *const CityMesh) -> *mut c_char {
+    json(&unsafe { &*mesh }.summary())
+}
+
+/// Tightly packed 28-byte vertices: position and normal as three `f32` each
+/// (Z up), then RGBA as four bytes. Valid until `city_mesh_free`.
+///
+/// # Safety
+/// `mesh` must be live and `layer` below the layer count in `city_mesh_info`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn city_mesh_vertices(mesh: *const CityMesh, layer: usize) -> *const Vertex {
+    unsafe { &*mesh }.layers[layer].vertices.as_ptr()
+}
+
+/// Triangle list of `u32`. Valid until `city_mesh_free`.
+///
+/// # Safety
+/// `mesh` must be live and `layer` below the layer count in `city_mesh_info`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn city_mesh_indices(mesh: *const CityMesh, layer: usize) -> *const u32 {
+    unsafe { &*mesh }.layers[layer].indices.as_ptr()
+}
+
+/// # Safety
+/// `mesh` must come from `city_mesh_macro` or `city_mesh_district`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn city_mesh_hash_hex(mesh: *const CityMesh) -> *mut c_char {
+    to_c(format!("{:016x}", mesh_hash(unsafe { &*mesh })))
+}
+
+/// # Safety
+/// `mesh` must come from `city_mesh_macro` or `city_mesh_district` and be freed
+/// only once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn city_mesh_free(mesh: *mut CityMesh) {
+    if !mesh.is_null() {
+        drop(unsafe { Box::from_raw(mesh) });
+    }
 }
 
 #[unsafe(no_mangle)]

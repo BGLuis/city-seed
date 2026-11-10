@@ -4,9 +4,9 @@
 
 [← Voltar ao README](../README.pt-BR.md)
 
-Todas as imagens desta página foram exportadas com `cargo maps`. Rode o comando mostrado em cada cidade para gerá-la de novo. O resultado vai para `maps/`: `composite.png` é a vista de cima, e há uma imagem por camada. Abra `maps/index.html` para ver todas.
+Os mapas desta página foram exportados com `cargo maps`, e as imagens 3D foram capturadas do visualizador web. Rode o comando mostrado em cada cidade para gerá-la de novo. O resultado vai para `maps/`: `composite.png` é a vista de cima, e há uma imagem por camada. Abra `maps/index.html` para ver todas.
 
-> As imagens daqui foram reduzidas a 64 cores para manter o repositório leve. Os arquivos que você gerar têm todas as cores. Conforme o gerador evolui, a mesma seed pode produzir outra cidade.
+> Os mapas daqui foram reduzidos a 64 cores para manter o repositório leve. Os arquivos que você gerar têm todas as cores. Conforme o gerador evolui, a mesma seed pode produzir outra cidade.
 
 ## Opções
 
@@ -45,6 +45,14 @@ cargo maps --seed 7 --population 5000 --region EU-W --size 1024
 
 <img src="examples/neighborhood.png" alt="Bairro pequeno" width="640" />
 
+**Vista 3D:**
+
+```text
+http://localhost:8765/3d.html?seed=7&population=5000&region=EU-W&distance=1300&pitch=0.6
+```
+
+<img src="examples/3d-neighborhood.jpg" alt="Vista 3D" width="640" />
+
 ### Cidade hexagonal
 
 30 mil pessoas. Quarteirões hexagonais regulares do perfil fictício, com mata em uma das bordas.
@@ -54,6 +62,14 @@ cargo maps --seed 11 --population 30000 --region XX-HEX --size 1024
 ```
 
 <img src="examples/hex-town.png" alt="Cidade hexagonal" width="640" />
+
+**Vista 3D:**
+
+```text
+http://localhost:8765/3d.html?seed=11&population=30000&region=XX-HEX&distance=2200&pitch=0.6
+```
+
+<img src="examples/3d-hex-town.jpg" alt="Vista 3D" width="640" />
 
 ### Cidade grande brasileira
 
@@ -65,6 +81,14 @@ cargo maps --seed 42 --population 400000 --region BR-SE --size 1024
 
 <img src="examples/br-city.png" alt="Cidade grande brasileira" width="640" />
 
+**Vista 3D:**
+
+```text
+http://localhost:8765/3d.html?seed=42&population=400000&region=BR-SE
+```
+
+<img src="examples/3d-br-city.jpg" alt="Vista 3D" width="640" />
+
 ### Metrópole europeia
 
 2 milhões de pessoas. Avenidas orgânicas, um rio com muitas pontes e linhas de trem chegando ao centro.
@@ -74,6 +98,14 @@ cargo maps --seed 21 --population 2000000 --region EU-W --size 1024
 ```
 
 <img src="examples/eu-metro.png" alt="Metrópole europeia" width="640" />
+
+**Vista 3D:**
+
+```text
+http://localhost:8765/3d.html?seed=21&population=2000000&region=EU-W
+```
+
+<img src="examples/3d-eu-metro.jpg" alt="Vista 3D" width="640" />
 
 ### Metrópole norte-americana
 
@@ -85,6 +117,14 @@ cargo maps --seed 5 --population 5000000 --region US-NE --size 1024
 
 <img src="examples/us-metro.png" alt="Metrópole norte-americana" width="640" />
 
+**Vista 3D:**
+
+```text
+http://localhost:8765/3d.html?seed=5&population=5000000&region=US-NE
+```
+
+<img src="examples/3d-us-metro.jpg" alt="Vista 3D" width="640" />
+
 ### Hipermetrópole
 
 40 milhões de pessoas, o maior tamanho aceito. Vários centros ligados por uma rede densa de trens.
@@ -94,6 +134,14 @@ cargo maps --seed 42 --population 40000000 --region JP-KT --size 1024
 ```
 
 <img src="examples/jp-hyper.png" alt="Hipermetrópole" width="640" />
+
+**Vista 3D:**
+
+```text
+http://localhost:8765/3d.html?seed=42&population=40000000&region=JP-KT&distance=1500&pitch=0.4
+```
+
+<img src="examples/3d-jp-hyper.jpg" alt="Vista 3D" width="640" />
 
 ## De retângulos a hexágonos
 
@@ -122,6 +170,55 @@ Cada exportação também grava cada camada separadamente. Estas vêm da cidade 
 | Terreno (`terrain.png`) | Metrô (`metro.png`) |
 | :---: | :---: |
 | <img src="examples/br-city-terrain.png" alt="Terreno" /> | <img src="examples/jp-hyper-metro.png" alt="Metrô" /> |
+
+## A vista 3D
+
+Cada endereço desta página abre exatamente aquela cidade e câmera. Primeiro inicie o visualizador:
+
+```sh
+./scripts/build-viewer.sh
+python3 -m http.server 8765 --directory viewer
+```
+
+| Parâmetro do endereço | Significado | Padrão |
+| :--- | :--- | :--- |
+| `seed` | Número que determina a cidade | `42` |
+| `population` | População | `5000000` |
+| `region` | Perfil regional | `JP-KT` |
+| `distance` | Distância da câmera em metros | `2500` |
+| `pitch` | Inclinação da câmera em radianos | `0.55` |
+| `yaw` | Direção da câmera em radianos | `-1` |
+| `view` | `underground` abre a vista do subsolo | superfície |
+
+### Rente às ruas
+
+Prédios, parques e fiação aérea de perto.
+
+```text
+http://localhost:8765/3d.html?seed=42&population=5000000&region=JP-KT&distance=500&pitch=0.32
+```
+
+<img src="examples/3d-jp-metro-street.jpg" alt="Rente às ruas" width="640" />
+
+### Subsolo
+
+Com a superfície oculta, cada rede aparece com sua cor. Aperte **Subsolo** no painel para chegar a esta vista.
+
+```text
+http://localhost:8765/3d.html?seed=42&population=40000000&region=JP-KT&view=underground
+```
+
+<img src="examples/3d-jp-hyper-underground.jpg" alt="Subsolo" width="640" />
+
+### Cidade inteira
+
+De longe, a cidade usa a versão simplificada: uma peça por distrito, colorida pela densidade.
+
+```text
+http://localhost:8765/3d.html?seed=42&population=40000000&region=JP-KT&distance=138000&pitch=0.9
+```
+
+<img src="examples/3d-jp-hyper-overview.jpg" alt="Cidade inteira" width="640" />
 
 ## Perfis regionais
 

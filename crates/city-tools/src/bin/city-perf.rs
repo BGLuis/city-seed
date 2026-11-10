@@ -4,6 +4,7 @@
 
 use city_core::city::{City, CityEvent, CityInput, CitySession, generate_city, generate_district};
 use city_core::geometry::centroid;
+use city_core::mesh::{city_mesh, district_mesh};
 use city_core::regions;
 use city_tools::{number, parse_args};
 use serde::Serialize;
@@ -17,6 +18,8 @@ const SEED: u64 = 42;
 const RUNS: usize = 3;
 const DISTRICT_SAMPLE: usize = 200;
 const MAX_SUPERLINEAR_FACTOR: f64 = 2.0;
+const VERTEX_BYTES: usize = 28;
+const INDEX_BYTES: usize = 4;
 
 #[derive(Serialize)]
 struct Measurement {
@@ -98,6 +101,46 @@ fn measure_districts(city: &City) -> (f64, f64) {
     (times[times.len() / 2], times[times.len() - 1])
 }
 
+fn measure_city_mesh(city: &City) -> f64 {
+    median(
+        (0..RUNS)
+            .map(|_| {
+                let start = Instant::now();
+                black_box(city_mesh(city));
+                elapsed_ms(start)
+            })
+            .collect(),
+    )
+}
+
+struct DistrictMeshes {
+    p50_ms: f64,
+    max_ms: f64,
+    max_triangles: f64,
+    max_megabytes: f64,
+}
+
+fn measure_district_meshes(city: &City) -> DistrictMeshes {
+    let step = (city.districts.len() / DISTRICT_SAMPLE).max(1);
+    let mut times = Vec::new();
+    let (mut max_triangles, mut max_vertices) = (0, 0);
+    for plan in city.districts.iter().step_by(step) {
+        let district = generate_district(city, plan.id).expect("planned district");
+        let start = Instant::now();
+        let mesh = black_box(district_mesh(city, plan.id, &district));
+        times.push(elapsed_ms(start));
+        max_triangles = max_triangles.max(mesh.triangle_count());
+        max_vertices = max_vertices.max(mesh.vertex_count());
+    }
+    times.sort_by(f64::total_cmp);
+    DistrictMeshes {
+        p50_ms: times[times.len() / 2],
+        max_ms: times[times.len() - 1],
+        max_triangles: max_triangles as f64,
+        max_megabytes: (max_vertices * VERTEX_BYTES + max_triangles * 3 * INDEX_BYTES) as f64 / 1e6,
+    }
+}
+
 fn measure_strike(city: &City, radius: f64) -> f64 {
     let center = centroid(&city.boundary);
     let times = (0..RUNS)
@@ -140,6 +183,27 @@ fn main() -> ExitCode {
         "golpe 2 km".into(),
         measure_strike(&large, 2_000.0),
         3_000.0,
+    );
+
+    suite.time(
+        "malha 3D da cidade".into(),
+        measure_city_mesh(&large),
+        1_000.0,
+    );
+    let meshes = measure_district_meshes(&large);
+    suite.time("malha 3D do distrito p50".into(), meshes.p50_ms, 30.0);
+    suite.time("malha 3D do distrito máximo".into(), meshes.max_ms, 60.0);
+    suite.record(
+        "triângulos no maior distrito".into(),
+        meshes.max_triangles,
+        120_000.0,
+        "tr",
+    );
+    suite.record(
+        "memória do maior distrito".into(),
+        meshes.max_megabytes,
+        16.0,
+        "MB",
     );
 
     let size_ratio = large.districts.len() as f64 / small.districts.len() as f64;

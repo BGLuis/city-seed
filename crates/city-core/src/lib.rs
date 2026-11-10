@@ -1,6 +1,7 @@
 pub mod city;
 pub mod environment;
 pub mod geometry;
+pub mod mesh;
 pub mod networks;
 pub mod parcels;
 pub mod regions;

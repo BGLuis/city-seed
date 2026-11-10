@@ -83,12 +83,18 @@ This repository was created to learn how to create seeds for generating urban hy
    cargo perf
    ```
 
-6. Build and serve the browser viewer, then open <http://localhost:8765>:
+6. Build and serve the browser viewer, then open <http://localhost:8765> for the 2D map or <http://localhost:8765/3d.html> for the 3D view:
 
    ```sh
    rustup target add wasm32-unknown-unknown
    ./scripts/build-viewer.sh
    python3 -m http.server 8765 --directory viewer
+   ```
+
+7. Run the 3D benchmark in headless Chrome, which exits with an error when a budget is exceeded and writes `target/perf/report-3d.json`. Without `--gl vulkan` it uses a software renderer and skips the frame budgets:
+
+   ```sh
+   python3 scripts/bench-3d.py --gl vulkan
    ```
 
 # 🤝 Contributors

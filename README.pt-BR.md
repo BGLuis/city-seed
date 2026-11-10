@@ -83,12 +83,18 @@ Foi criado esse repositório para aprender a criação de seeds para criação d
    cargo perf
    ```
 
-6. Compile e sirva o visualizador web, depois abra <http://localhost:8765>:
+6. Compile e sirva o visualizador web, depois abra <http://localhost:8765> para o mapa 2D ou <http://localhost:8765/3d.html> para a vista 3D:
 
    ```sh
    rustup target add wasm32-unknown-unknown
    ./scripts/build-viewer.sh
    python3 -m http.server 8765 --directory viewer
+   ```
+
+7. Rode o benchmark 3D no Chrome sem janela, que termina com erro quando um limite é ultrapassado e grava `target/perf/report-3d.json`. Sem `--gl vulkan`, ele usa renderização por software e ignora os limites de quadro:
+
+   ```sh
+   python3 scripts/bench-3d.py --gl vulkan
    ```
 
 # 🤝 Contribuidores
